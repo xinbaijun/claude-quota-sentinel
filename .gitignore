@@ -1,0 +1,18 @@
+# Local machine-specific config — never commit / 本机配置,不入库
+*.local.conf
+.env
+
+# Runtime state, logs, accounting output / 运行态与账目产物
+var/
+*.log
+
+# Credentials and account roster — DoD: nothing real ever lands in this repo
+# 凭据与账号名册:真实内容一律不得入库
+*.key
+*.pem
+credentials.json
+accounts.json
+
+# Editor / OS noise
+.DS_Store
+*.swp
