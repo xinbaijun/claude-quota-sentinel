@@ -78,19 +78,36 @@ printf '\x00\x01 POSCTRL-A-MARKER \x00\xff\n' > posctrl-blob.bin
 # for a reason that has nothing to do with traversal.
 # 跑 clone 自己那份,不是本仓这份:dod4-scan.sh 按自身位置解析模式文件,跑原仓那份会读到
 # 原仓的模式、看不见这里种下的标记——五个范围会全报 SILENT,而原因与遍历毫无关系。
-out="$(bash "$WORK/clone/tools/dod4-scan.sh" "$WORK/clone" 2>&1)"; rc=$?
+# tr -d '\0': range A matches inside the binary fixture, and command substitution
+# warns on NUL bytes. The warning is harmless but noisy in a control's output.
+# tr -d '\0':范围 A 会在二进制夹具里命中,而命令替换遇 NUL 会告警。告警无害,
+# 但正控的输出里不该有看着像出错的噪音。
+out="$(bash "$WORK/clone/tools/dod4-scan.sh" "$WORK/clone" 2>&1 | tr -d '\0')"; rc=$?
 echo "$out"
 echo "=== posctrl verdict ==="
 
+# Each range is checked against the ONE piece of evidence only that range can produce.
+# Checking merely for the tag would be far weaker: this script's own source contains
+# every marker as a literal, so "[B-blob" would light up from the script's own blob --
+# a file that is still present in the working tree, which proves nothing about B's
+# unique reach. The decisive B evidence is transient.txt, deleted from HEAD.
+# 每个范围只认「唯有该范围能产出」的那一条证据。只查标签会弱得多:本脚本正文里就写着
+# 全部标记,于是 "[B-blob" 会被脚本自己的 blob 点亮——那文件在工作树里还在,对 B 的独有
+# 能力什么都没证明。B 的决定性证据是已从 HEAD 删除的 transient.txt。
 fail=0
-for tag in '\[A-worktree\]' '\[B-blob' '\[C-message\]' '\[D-identity\]' '\[E-path\]'; do
-  label="$(printf '%s' "$tag" | tr -d '\\[]')"
-  if printf '%s' "$out" | grep -qE "$tag"; then
-    echo "  RANGE ${label} : fired  OK"
+check() {                               # $1 label, $2 fixed-string evidence, $3 why
+  if printf '%s' "$out" | grep -qF "$2"; then
+    printf '  RANGE %-12s fired  OK   (%s)\n' "$1" "$3"
   else
-    echo "  RANGE ${label} : SILENT -- this range was never traversed"; fail=1
+    printf '  RANGE %-12s SILENT **  expected evidence absent: %s\n' "$1" "$2"; fail=1
   fi
-done
+}
+check A-worktree '[A-worktree] ./.hidden-posctrl'          'hidden file'
+check A-binary   '[A-worktree] ./posctrl-blob.bin'         'binary file -- proves grep -a'
+check B-blob     '[B-blob transient.txt]'                  'deleted from HEAD, still in the pack'
+check C-message  'POSCTRL-C-MARKER appears only in this message' 'commit message only'
+check D-identity '[D-identity] POSCTRL-D-MARKER'           'committer identity'
+check E-path     '[E-path] POSCTRL-E-MARKER.txt'           'path name itself'
 
 # The scan must also have reported failure overall; a control that fires per-range
 # but still exits 0 would mean the verdict logic, not the traversal, is broken.
