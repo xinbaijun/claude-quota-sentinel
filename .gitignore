@@ -16,3 +16,19 @@ accounts.json
 # Editor / OS noise
 .DS_Store
 *.swp
+
+# SSH private keys and dotenv variants / SSH 私钥与 dotenv 变体
+# id_*_deploy is this project's OWN key-naming shape, and .claude.json is the very
+# credential file this project reads -- the two most likely things to get copied in.
+# id_*_deploy 正是本项目自己的私钥命名形态,.claude.json 正是本项目要读的那个凭据文件
+# ——最可能被顺手拷进仓的就是这两类。
+.env.*
+!.env.example
+id_rsa*
+id_ed25519*
+id_*_deploy
+.claude.json
+
+# Site-local scan patterns: they contain the very strings being hunted, so they must
+# never be published. / 站点本地扫描模式:内容就是被搜的那些字符串,绝不可入库。
+tools/dod4-*.local.txt

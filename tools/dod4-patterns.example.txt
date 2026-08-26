@@ -1,0 +1,16 @@
+# Generic secret / PII content patterns (ERE, one per line, blank + '#' ignored).
+# 通用凭据/PII 内容模式(ERE,每行一条,空行与 '#' 忽略)。
+#
+# Site-specific strings — internal hostnames, account rosters, private repo names —
+# must NOT go in this file: it is published. Put them in dod4-patterns.local.txt,
+# which is gitignored.
+# 站点专有字符串(内部主机名、账号名册、私有仓名)不得写进本文件——本文件会被公开。
+# 放进 dod4-patterns.local.txt,该文件已被 gitignore。
+
+[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}
+BEGIN [A-Z ]*PRIVATE KEY
+ssh-(rsa|ed25519|dss)[[:space:]]
+sk-ant-[A-Za-z0-9_-]{8,}
+AKIA[0-9A-Z]{16}
+xox[baprs]-[A-Za-z0-9-]{8,}
+ghp_[A-Za-z0-9]{20,}

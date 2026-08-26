@@ -1,0 +1,16 @@
+# Patterns checked against commit author/committer identities (range D).
+# 用于比对 commit author/committer 身份的模式(范围 D)。
+#
+# Deliberately NOT the generic email regex: every identity is an email by
+# construction, so a bare email pattern fires on every commit and the check
+# degrades into noise you learn to ignore.
+# 刻意不用通用 email 正则:身份天然就是邮箱,用它会条条命中,判据退化成噪音、
+# 反而训练出「看到红也照过」。
+#
+# Put the account emails/names that must never author a commit here — in
+# dod4-identity.local.txt (gitignored), not in this published file.
+# 把「绝不允许出现在 commit 身份里」的账号邮箱/名字写进 dod4-identity.local.txt
+# (已 gitignore),不要写进本公开文件。
+
+BEGIN [A-Z ]*PRIVATE KEY
+sk-ant-[A-Za-z0-9_-]{8,}

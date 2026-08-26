@@ -1,0 +1,13 @@
+# Generic path patterns (ERE). Matched against tree entry names, i.e. the file
+# names themselves — a path can leak even when every file's content is clean.
+# 通用路径模式(ERE)。匹配 tree entry 名,即文件名本身——内容全干净时路径仍可能泄漏。
+#
+# Site-specific paths go in dod4-paths.local.txt (gitignored), not here.
+# 站点专有路径放 dod4-paths.local.txt(已 gitignore),不放本文件。
+
+(^|/)id_[A-Za-z0-9]+_deploy
+(^|/)id_(rsa|dsa|ecdsa|ed25519)($|[^/]*)
+(^|/)\.claude\.json$
+(^|/)\.env($|\.)
+(^|/)[^/]*credential[^/]*
+(^|/)[^/]*\.(pem|key|p12|pfx)$
