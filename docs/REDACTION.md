@@ -125,8 +125,15 @@ is worse than not having it.
 Some internal names are **ordinary English words**. Say the private system has a
 dashboard command called `state` and a live-view command called `watch`. Neither can go
 into the content layer as a bare pattern: this repository contains dozens of legitimate
-uses of both words, so the pattern would fire constantly, and **a check that cries wolf
-is a check people stop reading**.
+uses of both words — there is a `lib/state.sh` in it — so the pattern would fire
+constantly, and **a check that cries wolf is a check people stop reading**.
+
+> ⚠️ `state` and `watch` are **invented stand-ins**, not the real names. The real list
+> belongs in the gitignored `tools/dod4-patterns.local.txt`, never in a published file —
+> a document that argues for keeping internal names out of a public repository has no
+> business spelling them out in its own body. What matters for the reader is the
+> **shape** of the problem — an internal name that is also a word you use all day — not
+> which two words they happen to be.
 
 ⇒ **That class is covered by review, not by the scanner**, and saying so is the point:
 a limitation you have written down can be checked by a human; one you have not looks
@@ -141,8 +148,14 @@ answer down** rather than leaving the scanner's silence to speak for it.
 
 有些内部名字**本身就是普通英文词**。假设那套私有系统有一个叫 `state` 的看板命令、
 一个叫 `watch` 的实时查看命令：两个都不能作为裸模式进内容层——本仓有几十处对这两个词的
-正当使用，模式会持续误报，而
+正当使用（仓里就有 `lib/state.sh`），模式会持续误报，而
 **一条总在喊狼来了的检查，人就不看了**。
+
+> ⚠️ `state` 与 `watch` 是**虚构的替身**，不是真名字。真实名单属于已 gitignore 的
+> `tools/dod4-patterns.local.txt`，绝不进任何会被公开的文件——一份主张「别把内部名字带进
+> 公开仓」的文档，没有理由在自己正文里把它们逐字写出来。对读者有用的是这个问题的
+> **形状**（一个内部名字同时是你天天在用的普通词），不是它碰巧是哪两个词。
+
 ⇒ **这一类靠人工复核覆盖，不靠扫描器**——把这句话写出来正是关键：写下来的限制人可以去查，
 没写下来的限制看起来和「已覆盖」一模一样。
 本仓正是靠这一遍人工查出两处这类残留（一条引用了那套系统看板概念的事故注释，
@@ -194,6 +207,27 @@ preserved. Only history changed; no content did.
 ⚠️ **The four newest commit SHAs changed.** Any document citing the pre-rewrite SHAs
 needs the old→new mapping; it is recorded in the rewrite report rather than here, and
 the pre-rewrite history is preserved in a git bundle held outside this repository.
+
+**The retreat / 退路**: the complete pre-rewrite history — all six original commits,
+residue included — was captured with `git bundle create --all` *before* the rewrite, and
+the restore was **drilled, not assumed**: the bundle was cloned back and checked to
+contain the original tip SHA *and* the residue itself.
+⭐ That second half is the point. A backup check that stops at "the file is there, and
+its checksum matches" answers **integrity**, never **availability** — a checksum cannot
+tell you whether the thing still restores. The only check that answers the real question
+is restoring it and looking at what came out.
+⭐ 备份的判据是「还原出来的是不是那个东西」，不是「文件在不在、哈希对不对」——
+**校验值保的是完整性，不是可得性**。所以那一遍是真的 clone 回来、真的确认残留原样重现。
+
+⚠️ The bundle's path and checksum are **deliberately not written here.** They are an
+internal filesystem location, and this file ships publicly — a document arguing for
+keeping internal paths out of a public repository cannot put one in its own body. They
+are recorded in the internal rewrite report instead. If you are holding this repository
+and need the pre-rewrite history, ask the maintainer rather than looking for it here.
+⚠️ bundle 的路径与校验值**刻意不写在这里**：它是内网文件系统位置，而本文件会被公开——
+一份主张「别把内网路径带进公开仓」的文档，不能在自己正文里放一条。它们记在内部的重写
+报告里。
+
 ⚠️ **最新四个 commit 的 SHA 已变**，引用旧 SHA 的文档需按映射表换算；映射表记在重写报告
 里，重写前的历史另存为仓外的 git bundle。
 
