@@ -224,10 +224,39 @@ quota_account_paused()  { [[ " $QUOTA_DISABLED_ACCOUNTS " == *" $1 "* ]]; }
 # 在役 = 既没退役也没暂停。凡是「能不能切过去」「算不算进分母」都用这个判据。
 quota_account_out_of_service() { quota_account_retired "$1" || quota_account_paused "$1"; }
 
-# 供 jq 用的 JSON 数组
+# quota_out_of_service_json — the roster as ONE JSON array, for `jq --argjson`.
+#
+# 🔴 The obvious implementation of this is wrong in a way that passes the obvious check.
+#    It used to be a pipeline ending in `... | grep -v '^$' | jq -R . | jq -sc . || printf '[]'`.
+#    With BOTH rosters empty, `grep -v` filters every line away and exits 1; `pipefail`
+#    (see quota-sentinel) makes the whole pipeline non-zero, so `jq -sc .` has ALREADY
+#    printed `[]` and the `||` fallback prints a second one. The result is `[]\n[]` —
+#    two JSON documents, not one array.
+#    ⭐ And `jq -e .` returns 0 on it. The handiest validity check you would reach for
+#    passes, which is exactly why it survived; `--argjson` is what actually rejects it,
+#    and the caller had that stderr going to /dev/null.
+#    Consequence when it bit: every candidate was filtered out, so the switcher could
+#    never switch, and the ledger recorded "no in-service account below both lines"
+#    while two accounts in the very same data sat far below both lines. A ledger that
+#    states a false reason is worse than one that says nothing.
+#    ⚠️ Same family as the SIGPIPE/pipefail defect fixed in tools/dod4-scan.posctrl.sh:
+#    a pipeline's exit status describing something other than what the pipeline produced.
+#
+# 🔴 这个函数的「显然写法」是错的,而且错得能通过那个「显然的检查」。
+#    旧写法在两张名册都为空时:`grep -v` 把所有行滤掉后退出 1,`pipefail` 令整条管道非零,
+#    于是 `jq -sc .` **已经打印过一个 `[]`**、`||` 兜底又打印一个 ⇒ 得到 `[]\n[]`,
+#    是**两个 JSON 文档**而不是一个数组。⭐ 而 `jq -e .` 对它返回 0——最顺手的那个
+#    有效性检查是通过的,这正是它藏住的原因;真正会拒绝它的是 `--argjson`,
+#    而调用方把那条 stderr 丢进了 /dev/null。
+#    后果:候选被全部滤掉 ⇒ 永不切号,而账本写下「没有任何在役账号低于两条线」,
+#    同一份数据里其实有两个远低于两条线。**说假理由的流水账比不说话更糟。**
+#
+# The rewrite has no filtering pipeline at all: jq does the splitting, so there is no
+# grep exit status for pipefail to pick up.
+# 重写后整条链里没有过滤环节:拆分交给 jq,于是不存在能被 pipefail 捡起来的 grep 退出码。
 quota_out_of_service_json() {
-  printf '%s %s\n' "$QUOTA_RETIRED_ACCOUNTS" "$QUOTA_DISABLED_ACCOUNTS" \
-    | tr ' ' '\n' | grep -v '^$' | jq -R . | jq -sc . 2>/dev/null || printf '[]'
+  printf '%s %s' "$QUOTA_RETIRED_ACCOUNTS" "$QUOTA_DISABLED_ACCOUNTS" \
+    | jq -Rc 'split(" ") | map(select(length > 0))' 2>/dev/null || printf '[]'
 }
 
 quota_claude_json() { printf '%s' "${QUOTA_CLAUDE_JSON:-$HOME/.claude.json}"; }

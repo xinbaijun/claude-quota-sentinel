@@ -942,14 +942,20 @@ quota_read_once() {
   quota_log "reading $email five=${five}% week=${week}% (fetched $(date -d "@$fetched" '+%H:%M:%S'); next tier ${refresh_interval}s)"
 
   # ── Seam for the switching half / 切号那一半的接缝 ────────────────────
-  # Upstream ended here with `quota_decide_once "$now"`, so that a reading just taken
-  # is judged on the same beat instead of waiting for the next one. That half is not
-  # in this milestone. The guard is written out rather than left implicit so that
-  # wiring it back is a single obvious step, and so that nobody reading this file
-  # concludes the decision simply does not exist.
-  # 上游这里以 `quota_decide_once "$now"` 收尾，让「刚采到的新读数」在同一拍内就被判到，
-  # 不必等下一拍。那一半不在本里程碑内。守卫显式写出来而不是留白，一是接回去只需一步，
-  # 二是免得读这份文件的人以为「判定这件事根本不存在」。
+  # A reading that was just taken is judged on the same beat, rather than waiting for
+  # the next one. `quota_decide_once` is supplied by lib/switch.sh; the guard stays
+  # because the reading half must remain usable on its own — with lib/switch.sh not
+  # sourced, this file still reads and records and simply never decides.
+  # ⚠️ This comment used to say the switching half "is not in this milestone", and it
+  #    kept saying so after the milestone that added it, sitting directly above the line
+  #    that now calls it. A stale comment on a seam is worse than none: the seam is
+  #    exactly where someone looks to find out whether a thing is wired up.
+  # 刚采到的读数在同一拍内就被判到,不必等下一拍。`quota_decide_once` 由 lib/switch.sh 提供;
+  # 这道 guard 保留,是因为读数那一半必须能独立可用——不 source lib/switch.sh 时,
+  # 本文件照常读数与记录,只是从不做判定。
+  # ⚠️ 这段注释原本写着切号那一半「不在本里程碑内」,而在补上它的那个里程碑之后仍这么写,
+  #    就贴在**现在会调用它**的那行上面。接缝上的过期注释比没有注释更糟:
+  #    接缝正是别人用来判断「这东西到底接没接上」的地方。
   if declare -F quota_decide_once >/dev/null 2>&1; then
     quota_decide_once "$now"
   fi

@@ -130,7 +130,26 @@ fi
 # tr -d '\0':范围 A 会在二进制夹具里命中,而命令替换遇 NUL 会告警。告警无害,
 # 但正控的输出里不该有看着像出错的噪音。
 out="$(bash "$WORK/clone/tools/dod4-scan.sh" "$WORK/clone" 2>&1 | tr -d '\0')"; rc=$?
-echo "$out"
+# 🔴 The scan output is printed with non-printable bytes replaced, not raw.
+#    The range-A fixture is deliberately binary, and `tr -d "\0"` above removes only the
+#    NULs -- the 0xff survives, which is enough for grep to classify this whole file as
+#    binary in a UTF-8 locale. The consequence is not cosmetic: the most natural way to
+#    consume this script is
+#        grep -q "POSCTRL_RESULT=FAIL" posctrl.log && exit 1
+#    and on a raw log that grep returns 1 without printing anything, so the failure
+#    branch NEVER fires. A control whose own output cannot be read by the thing checking
+#    it is a false green, and it fails in the safe-looking direction.
+#    ⭐ The earlier code knew about the NUL warning and fixed exactly that -- the noise --
+#    while leaving the byte that changes how every later reader treats the stream.
+# 🔴 扫描输出印出来时把不可打印字节替换掉,不原样吐。范围 A 的夹具刻意是二进制,
+#    上面的 `tr -d "\0"` 只删了 NUL,0xff 还在——在 UTF-8 locale 下足以让 grep 把整份
+#    输出判为二进制。后果不是观感问题:消费本脚本最自然的写法是
+#        grep -q "POSCTRL_RESULT=FAIL" posctrl.log && exit 1
+#    而在原始日志上这条 grep 什么都不打、返回 1 ⇒ **失败分支永远不会触发**。
+#    自己的输出没法被检查它的东西读到,这是假绿,而且是往「看起来没事」那个方向坏。
+#    ⭐ 旧代码知道 NUL 告警那一层并且正好修了它——修的是噪音——却留下了那个真正改变
+#    后续所有读者如何对待这条流的字节。
+printf '%s\n' "$out" | LC_ALL=C sed 's/[^[:print:]\t]/?/g'
 echo "=== posctrl verdict ==="
 
 # Each range is checked against the ONE piece of evidence only that range can produce.
@@ -219,5 +238,15 @@ else
   echo "  VERDICT       : scan exited 1 (DIRTY)  OK"
 fi
 
-[ "$fail" -eq 0 ] && { echo "POSCTRL_RESULT=PASS (all five ranges proven to go red)"; exit 0; }
-echo "POSCTRL_RESULT=FAIL (at least one range is blind)"; exit 1
+# The verdict carries which pattern set the scan underneath it was actually using.
+# A PASS says the scanner can go red; it says nothing about whether that particular run
+# was configured to look for anything real. Those are different claims and used to be
+# reported as one.
+# 判词带上「底下那次扫描用的是哪一份模式集」。PASS 说的是「扫描器能红」,
+# 它没说那一轮到底配没配上真要找的东西——这是两个断言,以前被合成了一个。
+pattern_src=example-only
+for b in dod4-patterns dod4-paths dod4-identity dod4-allow; do
+  [ -f "$WORK/clone/tools/${b}.local.txt" ] && { pattern_src=site; break; }
+done
+[ "$fail" -eq 0 ] && { echo "POSCTRL_RESULT=PASS (all five ranges proven to go red) patterns=$pattern_src"; exit 0; }
+echo "POSCTRL_RESULT=FAIL (at least one range is blind) patterns=$pattern_src"; exit 1

@@ -922,26 +922,61 @@ def credential_fingerprint(data: bytes) -> dict[str, Any]:
     }
 
 
-def prune_backups(root_home: Path, keep: int) -> list[Path]:
+def prune_backups(
+    root_home: Path,
+    keep: int,
+    protect: Iterable[Path] = (),
+) -> list[Path]:
     """Delete this tool's own oldest backups beyond `keep`. Returns what was removed.
 
     ⚠️ Scope is deliberately narrow: only directories this tool wrote, only inside
     BACKUP_DIR_NAME, only ones whose name matches BACKUP_PREFIX. The older flat layout
     directly under $HOME is READ but never pruned -- those directories may have been
     left by an earlier version or by a person, and deleting someone else's data because
-    it looks like ours is not a cleanup, it is an incident. Names are timestamped, so
-    lexical order is chronological.
+    it looks like ours is not a cleanup, it is an incident.
+
+    🔴 Ordering is by mtime, matching backup_candidates(). It must NOT be lexical, and
+    the reason is worth stating because the code here used to say the opposite:
+    directory names are `claude-backup-before-<reason>-<timestamp>`, so the REASON sorts
+    before the timestamp. `'r' < 's'` means every `rollback` safety backup sorted ahead
+    of every `switch` backup regardless of age, and retention deleted the newest thing
+    on disk first -- specifically, the safety backup that `--rollback` had just printed
+    to the operator as their safety net. Reachable at the default --keep 5.
+    ⭐ The check that missed this asserted a COUNT ("16 switches, still 5 backups"). The
+    count was right the whole time; what was wrong was which five survived.
+    ⚠️ Two orderings over the same set must not disagree about "newest": that is how
+    --rollback latest resolves to a directory prune considers next in line to delete.
+
+    🔴 排序依据是 mtime,与 backup_candidates() 同源,**不能用字典序**。理由值得写下来,
+    因为这里原本写着相反的话:目录名是 `claude-backup-before-<reason>-<timestamp>`,
+    reason 在时间戳**前面** ⇒ `'r' < 's'` 让每个 rollback 安全备份不论新旧都排在所有
+    switch 备份之前,于是保留策略第一个删掉的正是**磁盘上最新的那个**——也就是
+    `--rollback` 刚刚打印给操作者当安全网的那份。默认 --keep 5 即可达。
+    ⭐ 漏掉它的那条判据断言的是**数量**;数量自始至终是对的,错的是**留下来的是哪几个**。
+
+    `protect` is for the recovery path: the directory being restored FROM, and the
+    safety backup just written, must survive the prune that follows a rollback.
+    `protect` 供恢复路径使用:正在被还原的那个目录、以及刚写下的安全备份,
+    必须活过回滚之后的那次 prune。
     """
     if keep < 0:
         return []
     parent = root_home / BACKUP_DIR_NAME
     if not parent.is_dir():
         return []
-    owned = sorted(
+    keep_paths = set()
+    for path in protect:
+        try:
+            keep_paths.add(path.resolve())
+        except OSError:
+            continue
+    owned = [
         path
         for path in parent.iterdir()
         if path.is_dir() and path.name.startswith(BACKUP_PREFIX)
-    )
+    ]
+    owned = [p for p in owned if p.resolve() not in keep_paths]
+    owned.sort(key=lambda path: path.stat().st_mtime_ns)
     removed: list[Path] = []
     for path in owned[: max(0, len(owned) - keep)]:
         shutil.rmtree(path, ignore_errors=True)
@@ -1381,12 +1416,17 @@ def rollback(args: argparse.Namespace, selector: str) -> None:
             previous_raw: RawProfile | None = HostSource(args.root_home).load()
         except SwitchError:
             previous_raw = None
+        # keep=-1 defers pruning. Retention must not run while the directory being
+        # restored FROM is still unread -- a recovery path that can delete its own
+        # source before using it is not a recovery path.
+        # keep=-1 表示先不清理。正在被还原的那个目录还没读到之前不许跑保留策略——
+        # 一条能在用到自己来源之前把它删掉的恢复路径,不叫恢复路径。
         safety_backup = backup_current(
             args.root_home,
             "rollback",
             str(selected),
             args.backup_credentials,
-            args.keep,
+            -1,
         )
         uid, gid = target_owner(args.root_home)
         try:
@@ -1414,6 +1454,13 @@ def rollback(args: argparse.Namespace, selector: str) -> None:
             if isinstance(exc, SwitchError):
                 raise
             raise SwitchError(f"Rollback failed; the pre-rollback state was restored: {exc}") from exc
+    # Now that the restore has succeeded, apply retention -- protecting the directory
+    # it restored from and the safety backup about to be printed. Printing a path as a
+    # safety net and deleting it in the same command is a promise broken in one breath.
+    # 还原成功之后再执行保留策略,并保护「还原来源」与「即将打印出来的安全备份」。
+    # 一边把某个路径印成安全网、一边在同一条命令里把它删掉,是当场毁诺。
+    prune_backups(args.root_home, args.keep, protect=(selected, safety_backup))
+
     print(f"✅ rolled back from backup; current account: {metadata.email}")
     print(f"rollback source: {selected}")
     print(f"pre-rollback safety backup: {safety_backup}")
@@ -1439,8 +1486,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     action.add_argument(
         "--use",
-        metavar="INDEX|EMAIL|SOURCE",
-        help="Switch by index, full email address, or full source label",
+        metavar="INDEX|EMAIL|SOURCE|-",
+        help=(
+            "Switch by index, full email address, or full source label. "
+            "Use '-' to read the selector from stdin instead, which keeps the account "
+            "address off the command line where any process could read it with ps."
+        ),
     )
     action.add_argument(
         "--rollback",
@@ -1542,6 +1593,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     args.root_home = args.root_home.absolute()
+
+    # `--use -` takes the selector from stdin instead of argv.
+    #
+    # A selector on the command line is visible to every process on the host for as long
+    # as the switch runs -- `ps` and `pgrep -af` show it. For a human typing one command
+    # that is their own choice. On the automatic path nobody chose: the sentinel switches
+    # on its own schedule, so every switch would expose an account address with no
+    # operator involved.
+    # ⚠️ This is about the ADDRESS, not the token. The token is never on argv and cannot
+    #    be -- the calling side never reads credentials at all. An address is not a
+    #    credential, but it is the account roster, and keeping the roster unpublished is
+    #    a premise of this whole project.
+    # `--use -` 从 stdin 读选择器,不走 argv。命令行上的选择器在整个切号期间对宿主上任何
+    # 进程可见。人手敲命令时那是他自己的选择;自动路径上没有人做选择。
+    # ⚠️ 这条针对**地址**不是 token:调用侧根本不读凭据,token 不可能进 argv。
+    if args.use == "-":
+        args.use = sys.stdin.readline().strip()
+        if not args.use:
+            eprint(f"{PROGRAM}: --use - was given but stdin provided no selector")
+            return 2
     try:
         if args.rollback is not None:
             rollback(args, args.rollback)

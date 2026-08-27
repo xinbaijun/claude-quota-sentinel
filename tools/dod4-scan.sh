@@ -19,7 +19,25 @@
 # 范围 B 里,任何工作树 grep 都永远看不见。所以脱离范围说「DoD-4 通过」没有意义。
 #
 # Usage:  tools/dod4-scan.sh [repo-path]      default: the repo containing this script
-# Exit:   0 clean | 1 hits found | 9 setup error
+# Exit:   0 clean (with site patterns) | 1 hits found | 3 clean but EXAMPLE PATTERNS ONLY
+#         | 9 setup error
+#
+# 🔴 Why exit 3 exists.
+#    The site-local pattern files are gitignored by construction, and the example ones
+#    are committed. So on ANY fresh clone the pattern set is non-empty but contains none
+#    of the strings this repository actually needs to keep out -- and the old code only
+#    refused to run when the pattern set was *entirely* empty. The result was a scan that
+#    printed a verdict identical, character for character, to a properly configured run:
+#    `SCAN_RESULT=CLEAN hits=0`. On the clean machine of DoD-1, and on whatever machine
+#    runs the regression suite, that verdict was unconditionally true.
+#    ⭐ A check that cannot fail is not evidence, and one that is worded exactly like the
+#    real thing is worse than no check: it is a real check's output with nothing behind it.
+# 🔴 为什么有 exit 3。站点本地模式文件按构造被 gitignore、example 那份已提交 ⇒ **任何 clone**
+#    上模式集都非空、却不含本仓真正要挡的那些串,而旧代码只在模式集**全空**时才拒绝运行。
+#    于是它印出的判词与配置正确的那一次**逐字相同**:`SCAN_RESULT=CLEAN hits=0`。
+#    在 DoD-1 那台干净机器上、在跑回归的任何一台机器上,这句判词是**恒真**的。
+#    ⭐ 不可能失败的检查不是证据;而措辞与真检查一字不差的那种,比没有检查更糟——
+#    它是一份真检查的输出,后面什么都没有。
 #
 # Positive control: tools/dod4-scan.posctrl.sh — proves each of the five ranges is
 # actually traversed. A scanner that has never been shown to go red is not a check.
@@ -67,6 +85,16 @@ list_sources() {
     done
   done
   printf '%s' "${out# }"
+}
+
+# Is ANY site-local pattern file present? This is what separates a scan that could
+# actually find something from one that merely cannot fail.
+have_site_patterns() {
+  local base
+  for base in dod4-patterns dod4-paths dod4-identity dod4-allow; do
+    [ -f "$SELF_DIR/${base}.local.txt" ] && return 0
+  done
+  return 1
 }
 
 ALLOW_PAT="$(load_patterns dod4-allow)"     # may legitimately be empty / 允许为空
@@ -157,5 +185,18 @@ echo "---"
 cat "$hits"
 n=$(wc -l < "$hits" | tr -d ' ')
 echo "---"
-if [ "$n" -eq 0 ]; then echo "SCAN_RESULT=CLEAN hits=0 ranges=A,B,C,D,E"; exit 0
-else echo "SCAN_RESULT=DIRTY hits=$n ranges=A,B,C,D,E"; exit 1; fi
+if [ "$n" -gt 0 ]; then
+  echo "SCAN_RESULT=DIRTY hits=$n ranges=A,B,C,D,E patterns=$(have_site_patterns && echo site || echo example-only)"
+  exit 1
+fi
+if have_site_patterns; then
+  echo "SCAN_RESULT=CLEAN hits=0 ranges=A,B,C,D,E patterns=site"
+  exit 0
+fi
+# Clean, but with nothing site-specific to be clean OF. Said out loud, and with a
+# distinct exit status, so a caller cannot mistake it for a configured pass.
+echo "SCAN_RESULT=CLEAN-BUT-UNCONFIGURED hits=0 ranges=A,B,C,D,E patterns=example-only" >&2
+echo "dod4-scan: no tools/*.local.txt present, so this scan searched only the published" >&2
+echo "dod4-scan: example patterns. It cannot have found the real strings of this repo." >&2
+echo "dod4-scan: see docs/REDACTION.md for what belongs in each local file." >&2
+exit 3

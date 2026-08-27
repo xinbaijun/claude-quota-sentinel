@@ -43,7 +43,18 @@ quota_account_switch_record() {
     --argjson ts "$ts" --arg from "$from" --arg to "$to" \
     --arg kind "$kind" --arg note "$note" --arg mode "$QUOTA_SWITCH_MODE" \
     '{ts:$ts, iso:($ts|todate), from:$from, to:$to, kind:$kind, mode:$mode, note:$note}' \
-    2>/dev/null) || return 0
+    2>/dev/null) || {
+    # Losing the line is survivable; losing it SILENTLY is not. The append-failure path
+    # below logs, and this one did not -- so a jq failure produced a decision that left
+    # no trace in the ledger and none in the log either, which contradicts the rule at
+    # the top of this file. Still returns 0: bookkeeping must not unwind a completed
+    # switch.
+    # 丢一行还能活;**静默**丢一行不行。下面那条追加失败路径会记日志,而这条不会——
+    # 于是一次 jq 失败会让某个决定在账本和日志里都不留痕,与本文件开篇的规则冲突。
+    # 仍然 return 0:记账失败不该反向撤销一次已完成的切换。
+    quota_log "⚠️ could not build the switch ledger entry (jq failed); this decision is unrecorded: ${from:-?} -> ${to:-(stayed put)} [$kind]"
+    return 0
+  }
   printf '%s\n' "$line" >> "$QUOTA_SWITCH_LEDGER" 2>/dev/null || \
     quota_log "⚠️ could not append to the switch ledger: $QUOTA_SWITCH_LEDGER"
   return 0
@@ -91,15 +102,24 @@ quota_switch_pick() {
 
 # quota_switch_perform <to-email> — hand the actual credential move to account-switch.
 #
-# ⚠️ The address is passed as a selector on argv; the TOKEN never is, and never can be
-#    from here -- this function does not read credentials at all. account-switch reads
-#    and writes them itself, in its own process. Keeping the two apart is the reason
-#    `ps` cannot show a token during a switch.
+# 🔴 The selector goes in on STDIN (`--use -`), not on argv.
+#    It used to be `--use "$to"`, which put the account address on the command line of
+#    every automatic switch, readable by any process on the host via `pgrep -af` for as
+#    long as the switch ran. On the manual path that is the operator's own choice; here
+#    nobody chose -- the sentinel switches on its own schedule.
+#    ⚠️ The TOKEN was never here and never can be: this function does not read
+#    credentials at all, account-switch reads and writes them inside its own process.
+#    That separation is why `ps` cannot show a token during a switch, and it is
+#    unaffected by this change. What changed is the ADDRESS.
+# 🔴 选择器走 **stdin**(`--use -`),不走 argv。
+#    原来是 `--use "$to"`,于是每一次自动切号都把账号地址放上命令行,切号期间宿主上任何
+#    进程都能用 `pgrep -af` 读到。人工路径上那是操作者自己的选择;这里没有人做选择。
+#    ⚠️ token 从来不在这里、也不可能在:本函数根本不读凭据。改的是**地址**。
 quota_switch_perform() {
   local to="$1" out rc
   [[ -x "$QUOTA_ACCOUNT_SWITCH_BIN" ]] || {
     quota_log "❌ account-switch not executable at $QUOTA_ACCOUNT_SWITCH_BIN"; return 1; }
-  out=$("$QUOTA_ACCOUNT_SWITCH_BIN" --use "$to" --yes 2>&1); rc=$?
+  out=$(printf '%s\n' "$to" | "$QUOTA_ACCOUNT_SWITCH_BIN" --use - --yes 2>&1); rc=$?
   if (( rc != 0 )); then
     quota_log "❌ switch to ${to} failed (rc=${rc}): $(printf '%s' "$out" | tail -1)"
     return 1
@@ -120,9 +140,15 @@ quota_decide_once() {
   week=$(printf '%s' "$snap" | jq -r --arg a "$current" '(.accounts[$a].week // empty)' 2>/dev/null)
   [[ -z "$five" || -z "$week" ]] && return 0
 
+  # Accumulate, do not assign: when both lines are crossed the ledger has to say so.
+  # These two were plain assignments, so the weekly line silently overwrote the
+  # five-hour one and the ledger recorded a single cause for a double exhaustion --
+  # the reader then reasonably concludes the five-hour window was fine.
+  # 累加而不是赋值:两条线同时超时,账本必须两条都写。原来是两次直接赋值,周额度那句
+  # 会把五小时那句悄悄盖掉,双重耗尽在账本里只剩一个原因,读的人会据此以为五小时没事。
   local reason=""
-  (( $(printf '%.0f' "$five") >= QUOTA_SWITCH_PCT_FIVE )) && reason="five_hour ${five}% >= ${QUOTA_SWITCH_PCT_FIVE}%"
-  (( $(printf '%.0f' "$week") >= QUOTA_SWITCH_PCT_WEEK )) && reason="weekly ${week}% >= ${QUOTA_SWITCH_PCT_WEEK}%"
+  (( $(printf '%.0f' "$five") >= QUOTA_SWITCH_PCT_FIVE )) && reason="${reason:+$reason; }five_hour ${five}% >= ${QUOTA_SWITCH_PCT_FIVE}%"
+  (( $(printf '%.0f' "$week") >= QUOTA_SWITCH_PCT_WEEK )) && reason="${reason:+$reason; }weekly ${week}% >= ${QUOTA_SWITCH_PCT_WEEK}%"
   [[ -z "$reason" ]] && return 0
 
   local target
