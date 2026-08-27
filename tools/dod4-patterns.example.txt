@@ -6,6 +6,19 @@
 # which is gitignored.
 # 站点专有字符串(内部主机名、账号名册、私有仓名)不得写进本文件——本文件会被公开。
 # 放进 dod4-patterns.local.txt,该文件已被 gitignore。
+#
+# 🔴 WHICH local file: this one and dod4-paths.* feed DIFFERENT ranges.
+#    dod4-patterns.* -> ranges A/B/C, the text INSIDE files, blobs and commit messages.
+#    dod4-paths.*    -> range E only, tree entry NAMES.
+#    A token written only into the paths file is structurally invisible to the content
+#    ranges, and the scan still reports CLEAN. Internal command names, tool names and
+#    marker file names belong HERE as well as there -- this project shipped a leak
+#    through exactly that gap. See docs/REDACTION.md, "Which local file".
+# 🔴 该写进哪个:本文件与 dod4-paths.* 喂的是**不同范围**。
+#    dod4-patterns.* -> A/B/C,文件正文/blob/commit message 里的**字**。
+#    dod4-paths.*    -> 只有 E,**树条目名**。
+#    只写进路径层的 token,内容层结构性看不见它,而扫描照样报 CLEAN。内部命令名/工具名/
+#    标记文件名两边都要写——本项目就是从这个缝里漏出去过一次。见 docs/REDACTION.md。
 
 [A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}
 BEGIN [A-Z ]*PRIVATE KEY

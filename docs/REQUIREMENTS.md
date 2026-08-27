@@ -27,6 +27,29 @@ you discover it from a wrong answer.
 而「读数恒空」与「这个账号没有额度数据」**长得一模一样**。所以 `quota-sentinel deps`
 开头就查它并拒绝继续，而不是让你从一个错答案里发现它。
 
+## 🔴 The first thing that will happen to you / 你第一次跑最可能撞上的事
+
+**On a machine that has never logged into `claude`, this tool reads no quota at all.**
+It prints `⚠️ cannot read cachedUsageUtilization` and stops there.
+
+That is not a bug and not a missing dependency — it is the shape of the whole design.
+There is no public API for the authoritative reading. The number comes from
+`~/.claude.json`, and **Claude Code is the only thing that writes it**. No login, no
+file; no file, no reading.
+
+⇒ Order of operations: install `claude`, log in, use it at least once, **then** run
+this tool. Verifying the install with `quota-sentinel status` before you have ever
+logged in will look exactly like the tool being broken.
+
+**一台从未登录过 `claude` 的机器上，本工具读不到任何额度**，只会打印
+`⚠️ cannot read cachedUsageUtilization` 然后停在那里。
+
+这不是缺陷，也不是缺依赖——它就是整个设计的形状：权威读数没有公开接口，那个数来自
+`~/.claude.json`，而**只有 Claude Code 自己会写它**。没登录就没有那个文件，没有文件就没有读数。
+
+⇒ 次序：装 `claude` → 登录 → 至少用过一次 → **然后**才跑本工具。
+在还没登录过的时候用 `quota-sentinel status` 验证安装，看起来会和「工具坏了」一模一样。
+
 ## Required for the panel reader / 面板读数那条链需要
 
 The authoritative reading comes from driving a dedicated Claude Code session that types

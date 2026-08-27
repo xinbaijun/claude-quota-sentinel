@@ -96,6 +96,23 @@ quota_require_deps() {
 }
 
 # ── status ──────────────────────────────────────────────────────────────
+# 🔻 REWRITTEN DURING EXTRACTION. Baseline: `sentinel-quota:4853-4936` @ e2f32279.
+#    Two changes, both declared:
+#      · the header line used `TZ=CST-8 date` — a fixed UTC+8 that was true on exactly
+#        one machine. It now renders through `quota_fmt_ts`, i.e. the offset resolved
+#        once from this host. See lib/config.sh (QUOTA_TZ_OFFSET_SEC) for why the
+#        resolution happens once and why it refuses to guess.
+#      · all human-facing output translated to English.
+#    Two things were dropped with the features they belonged to: the recent-switches
+#    list (`quota_cmd_switches`, switching side) and the last-banner-sample line (its
+#    data source is not extracted). Everything else — including the three-state
+#    monitor report and the reason it exists — came across unchanged.
+# 🔻 抽取时**重写过**。基线 `sentinel-quota:4853-4936` @ e2f32279。两处改动，都已声明：
+#      · 抬头行原用 `TZ=CST-8 date`（写死 UTC+8，只在一台机器上为真），现改走
+#        `quota_fmt_ts`，即从本宿主解析一次得到的偏移量；理由见 lib/config.sh。
+#      · 全部面向人的输出英文化。
+#    另有两样随它们所属的功能一起去掉：最近切号列表（切号侧）与最近一次横幅采样行
+#    （数据源未抽取）。其余——包括监控会话三态与它存在的理由——原样过来。
 quota_cmd_status() {
   local now; now=$(date +%s)
   local snap

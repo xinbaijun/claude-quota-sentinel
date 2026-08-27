@@ -77,14 +77,16 @@ c1(){ need CLEANROOM_PRIVATE_ENV_PREFIX "$CLEANROOM_PRIVATE_ENV_PREFIX" || exit 
 c2(){ need CLEANROOM_PRIVATE_ROOT "$CLEANROOM_PRIVATE_ROOT" || exit 1
       need CLEANROOM_PRIVATE_SHIMS "$CLEANROOM_PRIVATE_SHIMS" || exit 1
       local hit=() c r
-      # The assertion is NOT "this name does not exist". Some of these names collide
-      # with real system commands (plenty of ordinary words are also real binaries), and
-      # demanding that a real command disappear is an **unimplementable assertion** —
-      # permanently red, which trains people to ignore red.
+      # The assertion is NOT "this name does not exist". Short internal command names
+      # collide with real system utilities more often than you would expect — plenty of
+      # ordinary words are also real binaries on a stock Linux — and demanding that a
+      # real command disappear is an **unimplementable assertion**: permanently red,
+      # which trains people to ignore red.
       # The assertion is "the name does not resolve to a shim that forwards into that
       # private environment".
-      # 判据不是「这个名字不存在」——其中有些名字与真实系统命令撞名，要求真命令消失是
-      # **不可实现的判据**（恒红，会训练出「看到红也照过」）。判据是「这个名字解析到的
+      # 判据不是「这个名字不存在」——短命令名与真实系统工具撞名的概率比想象中高（一台
+      # 干净 Linux 上不少普通英文词本身就是真二进制），而要求一个真命令消失是
+      # **不可实现的判据**：恒红，会训练出「看到红也照过」。判据是「这个名字解析到的
       # 东西不是一个转发进那套环境的壳」。
       for c in $CLEANROOM_PRIVATE_SHIMS; do
         r=$(command -v "$c" 2>/dev/null) || continue

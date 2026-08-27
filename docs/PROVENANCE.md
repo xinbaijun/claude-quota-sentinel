@@ -1,11 +1,19 @@
 # Provenance / 抽取来源映射
 
-Everything in this repository was extracted from a private in-house
+Almost everything in this repository was extracted from a private in-house
 fleet-automation codebase at commit `e2f32279`. This file records, function by
-function, exactly where each piece came from, so that any line here can be checked
-against the original.
-本仓的一切都抽取自一个非公开的内部编队自动化代码库，基线 commit 是 `e2f32279`。
-本文件逐函数记录每一块的来源，使这里的任何一行都能与原文核对。
+function, where each extracted piece came from, so that it can be checked against the
+original. **The exception is the CLI shell written for this repository** — four
+functions that have no upstream counterpart; they are listed in their own section
+below rather than left to look like an omission.
+本仓**几乎**一切都抽取自一个非公开的内部编队自动化代码库，基线 commit 是 `e2f32279`。
+本文件逐函数记录每一块**抽来的**来源，使它能与原文核对。**例外是为本仓新写的 CLI 外壳**
+——四个上游没有对应物的函数；它们单列一节，而不是任其看起来像漏项。
+
+> ⚠️ **这句话曾经写成「本仓的一切……任何一行都能核对」，而那是假的**：仓里 113 个函数
+> 定义里当时有 10 个没有来源行（6 个来自基线、4 个是新写的）。
+> ⭐ **一份自称「任何一行都能核对」而实际有函数无从核起的映射表，比没有这句话更糟**
+> ——它会让读者停止自己去核。补全见下；口径已按事实收窄。
 
 ## How to verify a mapping / 怎么核一条映射
 
@@ -165,6 +173,38 @@ extracted together with the code on purpose.
 | `quota_capacity_update` | `e2f32279:scripts/sentinel-quota:3714-3785` |
 | `quota_monitor_op_run` | `e2f32279:scripts/sentinel-quota:4715-4742` |
 
+### `quota-sentinel` (CLI shell) / `lib/config.sh`  ←  `scripts/sentinel-quota`
+
+These six were extracted but were missing from the tables above until the m2 review
+caught it. Ranges follow the same convention as everywhere else in this file —
+**the function plus its attached comment block**.
+这六个是抽取来的，但直到 m2 review 才被发现漏在上面各表之外。行范围口径与本文件其余
+各处一致：**函数本体加紧挨其上的注释块**。
+
+| function / 函数 | baseline lines / 基线行号 | note / 说明 |
+|---|---|---|
+| `quota_cmd_status` | `e2f32279:scripts/sentinel-quota:4853-4936` | 🔻 **rewritten** — see the note at its definition / **重写**，见定义处 |
+| `quota_cmd_capacity` | `e2f32279:scripts/sentinel-quota:4938-5017` | output translated; the display layer's null-tolerance and its reasons are unchanged / 输出英文化；展示层的 null 容忍与其理由未变 |
+| `quota_cmd_detect` | `e2f32279:scripts/sentinel-quota:5019-5030` | output translated; `reset` now renders through `quota_fmt_ts` / 输出英文化；`reset` 改走 `quota_fmt_ts` |
+| `quota_idle_cursor_regex` | `e2f32279:scripts/sentinel-quota:666-666` | copied verbatim / 逐字复制 |
+| `quota_log` | `e2f32279:scripts/sentinel-quota:676-682` | copied, minus the soft hook into a supervising daemon that does not exist here / 复制，去掉软挂那个本仓不存在的监督 daemon 的分支 |
+| `die` | `e2f32279:scripts/claude-account-probe:123-123` | copied verbatim / 逐字复制 |
+
+### Written for this repository / 本仓新写
+
+Four functions have **no upstream counterpart**. Listed rather than omitted, for the
+same reason the "not extracted" table exists: a reader who finds no mapping row should
+be able to see immediately that it is a fact, not a gap in this document.
+四个函数**上游没有对应物**。列出来而不是略去，理由与「未抽取」那张表相同：
+读者找不到映射行时，应当能立刻看出那是事实，不是本文件的缺口。
+
+| function / 函数 | where / 位置 | why it exists / 为什么有它 |
+|---|---|---|
+| `quota_tz_date` | `lib/config.sh` | runs `date` under a TZ spec, or under the local zone when the spec is empty. `TZ= date` is **not** "local" — an empty TZ means UTC on glibc — so the distinction has to live in a branch, not in a variable expansion / 空 TZ 在 glibc 下等于 UTC，这个区别只能靠分支表达 |
+| `quota_require_deps` | `quota-sentinel` | up-front dependency check. A missing `jq` otherwise surfaces as a reading that is quietly always empty, which is indistinguishable from "this account has no quota data" / 少了 `jq` 的表现是读数恒空，与「这个账号没有额度数据」长得一模一样 |
+| `quota_cmd_env` | `quota-sentinel` | prints the resolved configuration; every "it does not work on my machine" so far came down to a path or an offset resolving somewhere unexpected / 打印解析后的配置 |
+| `quota_usage_text` | `quota-sentinel` | the usage text, which also states what this milestone does **not** include / 用法文本，同时写明本里程碑**不**含什么 |
+
 ### `account-probe`  ←  `scripts/claude-account-probe`
 
 | piece / 部分 | baseline lines / 基线行号 | note / 说明 |
@@ -212,12 +252,19 @@ them were carried across; the plumbing around them was replaced.
 ## Rewritten, and why / 重写了什么，为什么
 
 Three functions and one main flow could not come across unchanged, because their
-inputs do not exist outside the environment they were written in. Each carries a
+inputs do not exist outside the environment they were written in; one more was
+rewritten because it hard-coded a single machine's time zone. Each carries a
 `🔻 REWRITTEN` note at its definition explaining what was removed and **what that
 costs** — the cost is stated rather than quietly dropped.
-三个函数和一段主流程无法原样过来，因为它们的输入在那套环境之外根本不存在。每一个的定义
-处都带着 `🔻 REWRITTEN` 注释，说明删掉了什么、**代价是什么**——代价是写出来的，不是
-悄悄丢掉的。
+三个函数和一段主流程无法原样过来，因为它们的输入在那套环境之外根本不存在；另有一个
+因为写死了某一台机器的时区而被重写。每一个的定义处都带着 `🔻 REWRITTEN` 注释，
+说明删掉了什么、**代价是什么**——代价是写出来的，不是悄悄丢掉的。
+
+> ⚠️ **`quota_cmd_status` 那一条是 m2 review 补上的**：它事实上被改写过（写死的 UTC+8 →
+> 解析出的偏移量、输出英文化），却既没有映射行、也没有 `🔻` 标注，而上面这句话当时就写着
+> 「每一个的定义处都带着 🔻」。⭐ **一处漏标同时把三句声称变成假的**——本节这句、
+> 开篇「任何一行都能核对」那句、以及交付报告里「全部 96 个函数都有映射」那句。
+> ⇒ 增删重写函数时，**这张表、映射表、定义处的 `🔻` 三者必须同时改**。
 
 | here / 本仓 | baseline / 基线 | removed / 删掉的 |
 |---|---|---|
@@ -225,6 +272,7 @@ costs** — the cost is stated rather than quietly dropped.
 | `quota_refresh_force_due` (`lib/state.sh`) | `sentinel-quota:2746–2775` | 2 of 3 triggers: banner self-report, concurrency jump |
 | `quota_read_once` (`lib/state.sh`) | `quota_poll_once`, `sentinel-quota:4069–4275` | dead-session reaping, banner sampling, and the whole switching half |
 | `account-probe` main flow | `claude-account-probe:294–379` | multi-account discovery (needs the switching tool) and the container liveness probe (needs Docker, and writes credential copies to disk) |
+| `quota_cmd_status` (`quota-sentinel`) | `sentinel-quota:4853–4936` | the fixed UTC+8 in the header line; plus the recent-switches list and the banner-sample line, which went with the features they belong to |
 
 ## Not extracted / 未抽取
 

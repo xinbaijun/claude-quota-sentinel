@@ -75,6 +75,109 @@ in the pack, where no amount of grepping the checkout will ever find it.
 开源前最经典的那种泄漏（提交了、发现了、下个 commit 删掉）已经从工作树消失，却仍躺在
 对象库里，再怎么 grep 检出目录都永远看不见它。
 
+### Which local file does a pattern go in? / 一个模式该写进哪个本地文件？
+
+🔴 **This is where this project's leak scan has actually failed, so read it before
+adding anything.** The two site-local files feed **different ranges**:
+
+| file / 文件 | feeds / 喂给 | sees / 看得见 |
+|---|---|---|
+| `dod4-patterns.local.txt` | ranges **A / B / C** | the text **inside** files, blobs and commit messages |
+| `dod4-paths.local.txt` | range **E** only | **tree entry names** only |
+
+⇒ **A token written only into the paths file is structurally invisible to the content
+ranges, and the scan still reports CLEAN.** That is not a hypothetical: an internal
+tool's command name lived only in the paths file, walked out through `README.md` and a
+commit message, and the five-range scan stayed green with all six positive controls
+firing.
+⇒ **只写进路径层的 token，内容层结构性看不见它，而扫描照样报 CLEAN。**这不是假设：
+一个内部工具的命令名只在路径层，于是它从 `README.md` 与一条 commit message 走了出去，
+五范围扫描全绿、六格正控全部 fired。
+
+⭐ **A positive control that fires only proves "what is in the table can be caught". It
+does not prove "everything that should be in the table is in it."** Sampling verifies
+the correctness of the entries; it cannot verify the coverage of the table itself.
+⇒ After adding patterns, check **from the token side** — enumerate every class of
+private token you care about and ask which ranges cover it — rather than sampling from
+the table.
+⭐ **正控 fired 只证明「表里有的能被抓到」，不证明「该在表里的都在表里」。**
+⇒ 加完模式要**从 token 侧反查范围覆盖**，不是从模式表抽样。
+
+**Internal command names, internal tool names and marker file names must go into
+`dod4-patterns.local.txt` (the content layer)** — writing them only into the paths file
+checks tree entry names and nothing else.
+**内部命令名／内部工具名／标记文件名必须写进 `dod4-patterns.local.txt`（内容层）**；
+只写进路径层等于只查了树条目名。
+
+⚠️ But do **not** put everything internal-looking in there either. The criterion is
+**"is this worth anything to a public reader?"** A source path inside the private repo
+is load-bearing provenance — `git show <SHA>:<path>` is how anyone checks this
+extraction — and adding it to the content layer makes the scan **permanently red on
+approved content**. A check that is always red teaches people to click past red, which
+is worse than not having it.
+⚠️ 但也**不要**把所有看起来内部的东西都塞进去。判据是**「对公开读者有没有价值」**：
+私有仓内的源文件路径是承重的 provenance（`git show <SHA>:<path>` 正是核对本次抽取的
+方式），把它加进内容层会让扫描在**已获批准的内容**上恒红——而恒红的检查会训练出
+「看到红也照过」，比没有更糟。
+
+### What the scanner structurally cannot cover / 扫描器结构性覆盖不到什么
+
+Some internal names are **ordinary English words**. Say the private system has a
+dashboard command called `state` and a live-view command called `watch`. Neither can go
+into the content layer as a bare pattern: this repository contains dozens of legitimate
+uses of both words, so the pattern would fire constantly, and **a check that cries wolf
+is a check people stop reading**.
+
+⇒ **That class is covered by review, not by the scanner**, and saying so is the point:
+a limitation you have written down can be checked by a human; one you have not looks
+exactly like coverage.
+
+Two such residues were found in this repository by exactly that human pass — an
+incident note referring to the private system's bookkeeping, and a comment that
+disclosed which name was on its internal command list by using it as an example. Both
+are fixed. Neither would ever have been caught by a regex.
+⇒ When adding a token class, ask which of the two buckets it is in, and **write the
+answer down** rather than leaving the scanner's silence to speak for it.
+
+有些内部名字**本身就是普通英文词**。假设那套私有系统有一个叫 `state` 的看板命令、
+一个叫 `watch` 的实时查看命令：两个都不能作为裸模式进内容层——本仓有几十处对这两个词的
+正当使用，模式会持续误报，而
+**一条总在喊狼来了的检查，人就不看了**。
+⇒ **这一类靠人工复核覆盖，不靠扫描器**——把这句话写出来正是关键：写下来的限制人可以去查，
+没写下来的限制看起来和「已覆盖」一模一样。
+本仓正是靠这一遍人工查出两处这类残留（一条引用了那套系统看板概念的事故注释，
+以及一条把某个名字举例出来、等于披露它在内部命令名单上的注释），两处均已修。
+**正则永远抓不到它们。**
+
+### Known residue — must be settled before going public / 已知残留：转 public 前必须结清
+
+🔴 **One internal tool's command name survives in this repository's git history**, in
+two ranges:
+
+| range / 范围 | what / 什么 |
+|---|---|
+| **B** — blobs | two historical versions of `README.md` (4 hits) |
+| **C** — commit message | one commit message body (1 hit) |
+
+The working tree itself is clean; the name was removed from `README.md` and replaced
+with a description of the behaviour, which loses no information for a public reader
+(they do not have that tool, so the name was worth nothing to them anyway).
+
+Removing it from **history** has exactly two options — **accept it**, or **rewrite
+history**. Rewriting history is irreversible and lands on someone's own hosted
+repository, so it is not a decision this tooling makes. **It is open, and it is
+deliberately recorded here rather than left as an undocumented old debt.**
+
+⚠️ Settle **both ranges together**. Fixing only the commit message leaves four hits in
+the blobs, and a reader who checks range C alone will believe it is done.
+
+🔴 **一个内部工具的命令名仍留在本仓 git 历史里**，落在两个范围：范围 B（`README.md` 的
+两个历史版本，4 处）与范围 C（一条 commit message，1 处）。工作树本身是干净的。
+从**历史**里去掉它只有两条路——**接受现状**或**重写历史**；后者不可逆、且落在别人自己的
+托管仓上，不是这套工具该做的决定。**此项开着，刻意记在这里，而不是留成一笔没人记得的旧账。**
+⚠️ **两个范围要一起结清**：只改 commit message 会在 blob 里留下 4 处，而只查范围 C 的人
+会以为已经完事。
+
 ⚠️ Site-specific patterns — the real names, your internal hostnames, your private repo
 name — go in `tools/dod4-*.local.txt`, which is gitignored. They must never go in the
 published `*.example.txt` files, for two reasons: it would put the hunted strings into

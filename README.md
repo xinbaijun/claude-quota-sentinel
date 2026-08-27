@@ -113,13 +113,15 @@ This rule has no expiry: it applies to every later extraction, not just the firs
 ### Note for maintainers — use plain `git` in this repo / 维护者须知：本仓用原生 `git`
 
 This repo wires its own deploy key through the in-repo `core.sshCommand`. Do **not** drive
-it with a git wrapper that unconditionally exports
-`GIT_SSH_COMMAND`, environment beats config in git's precedence order, and the in-repo
-wiring is silently replaced by a default key that has no access here. Plain `git` works.
+it with a wrapper that exports `GIT_SSH_COMMAND` — environment beats config in git's
+precedence order, so the in-repo wiring is silently replaced by whatever key that wrapper
+prefers, and that key has no access here. The failure is a permission error on push with
+no hint that a wrapper substituted the key. Plain `git` works.
 
-本仓用仓内 `core.sshCommand` 接自己的 deploy key。**不要**用会改 SSH 命令的 git 包装器
-操作本仓：它会无条件 `export GIT_SSH_COMMAND`，而 git 的优先级是环境变量高于配置，
-仓内接线会被静默换成一把在这里没有权限的缺省 key。用原生 `git` 即可。
+本仓用仓内 `core.sshCommand` 接自己的 deploy key。**不要**用任何会 `export GIT_SSH_COMMAND`
+的 git 包装器操作本仓：git 的优先级是环境变量高于配置，仓内接线会被静默换成那个包装器
+偏好的 key，而那把 key 在这里没有权限。表现是 push 时报权限错，且不会有任何线索提示
+「是包装器把 key 换掉了」。用原生 `git` 即可。
 
 ## License / 许可证
 

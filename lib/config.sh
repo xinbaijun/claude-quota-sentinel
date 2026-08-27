@@ -49,7 +49,7 @@ QS_STATE_DIR="${QS_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/quota-sentin
 #
 # ⚠️ Upstream note kept, with its reason rewritten for this repo: the session name
 # there deliberately carried no supervisor-parseable suffix, so the fleet's daemon
-# would not adopt it — no auto-Enter, no bookkeeping row, no renaming. Here there is no
+# would not adopt it — no keys sent to it, no bookkeeping row, no renaming. Here there is no
 # such supervisor, but the constraint still matters for a different reason: **do not
 # point this at a session you actually work in.** This session gets keys sent to it
 # and gets restarted; anything else living in it will be disturbed.
