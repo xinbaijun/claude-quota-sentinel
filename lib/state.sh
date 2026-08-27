@@ -445,7 +445,8 @@ quota_account_guard() {
   if [[ -n "$actual_email" ]]; then
     local last_rec; last_rec=$(quota_state_get '.account_guard.last_switch_recorded' "")
     if [[ "$last_rec" != "$actual_email" ]]; then
-      quota_account_switch_record "$now" "${expected_email:-未知}" "$actual_email" "外部"         "非 sentinel 发起，守卫已 fail closed 停止跟随；确认无误请跑 sentinel-quota manual-switch $actual_email --yes"
+      quota_account_switch_record "$now" "${expected_email:-unknown}" "$actual_email" "external" \
+        "not initiated by this tool; the guard has failed closed and is not following. If this was intended, switch with: quota-sentinel switches (to review) then account-switch --use $actual_email"
       quota_state_merge '.account_guard.last_switch_recorded = $a' --arg a "$actual_email" || true
     fi
   fi

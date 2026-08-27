@@ -120,6 +120,44 @@ is worse than not having it.
 方式），把它加进内容层会让扫描在**已获批准的内容**上恒红——而恒红的检查会训练出
 「看到红也照过」，比没有更糟。
 
+### A token's classification is not permanent / 分类会随抽取范围变化
+
+🔴 The same string can be an internal path in one milestone and a functional identifier
+in the next, and the pattern table has to be revisited when that happens.
+
+Worked example, from m3. `claude-backup-before-` was listed under internal paths when
+the redaction table was built. That was correct at the time and the note beside it said
+so explicitly: *the repo has zero legitimate uses of this prefix, so there is no
+false-positive cost*. Then m3 extracted the account-switch tool, and that prefix became
+the name of the directory this published tool creates and reads — it has to stay
+readable, or the tool cannot see backups written by earlier versions. Overnight a
+pattern with no false-positive cost acquired one, and the scan went `DIRTY` on entirely
+correct, entirely publishable code.
+
+⭐ The failure mode if you leave it: the scan is now **permanently red**, and a check
+that is always red teaches people to click past red — including the day it goes red for
+a real reason. The fix is not an allowlist entry (that hides it), it is re-answering the
+classification question the table is built on: *does this string carry value for a
+public reader?* A directory the tool creates does. An internal mount root does not.
+
+⚠️ So the rule is: **when a milestone widens what gets extracted, re-run the scan and
+treat every new hit as a classification question first, not as a leak first.** The hit
+above was a true report of a stale classification, not a false positive — the scanner
+was right, the table was out of date. What went stale was a judgement, and judgements do
+not announce that they have expired.
+
+🔴 同一个串在这个里程碑是内网路径，在下一个里程碑可能变成功能标识；抽取范围一变，
+模式表就要重判一次。m3 的实例：`claude-backup-before-` 建表时按内网路径收，当时的旁注
+写得很清楚——「全仓零合法用法，所以广义形式没有误报成本」。m3 把 account-switch 抽进来
+之后，它成了**本工具自己创建并读取**的备份目录前缀（且必须保留才能读旧版本写的备份），
+于是一个原本零误报成本的模式一夜之间有了成本，扫描在完全正确、完全可发布的代码上转红。
+⭐ 不处理的后果：扫描从此**恒红**，而恒红的检查训练出「看到红也照过」——包括它真的
+因为真问题转红的那天。解法不是加白名单（那是藏起来），是重新回答建表所依据的那个问题：
+**这个串对公开读者有没有价值？** 工具自己创建的目录有；内网挂载根没有。
+⚠️ ⇒ 里程碑扩大抽取范围时，重跑扫描，**新命中一律先当分类问题、不要先当泄漏**。上面
+那条是「分类过期」的真实报告，不是误报——扫描器是对的，过期的是表。**过期的是一个判断，
+而判断不会自己宣布它过期了。**
+
 ### What the scanner structurally cannot cover / 扫描器结构性覆盖不到什么
 
 Some internal names are **ordinary English words**. Say the private system has a

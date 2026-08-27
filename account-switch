@@ -1,0 +1,1574 @@
+#!/usr/bin/env python3
+"""Discover Claude Code accounts and switch the active one.
+
+Candidates come from host home directories, Docker containers, and this tool's own
+switch backups. Copies of the same account are merged by credential expiresAt and
+the freshest copy is the one that gets installed.
+
+Safety rules:
+  * Only account metadata and whether a token is non-empty are ever printed.
+    Token contents are never printed, never logged, and never passed as argv.
+  * The current state is backed up first; the target file is replaced atomically
+    via a same-directory temp file plus os.replace.
+  * Claude is never invoked and the network is never touched. Usage figures and
+    refresh times come from the local cache only, so they can be stale.
+"""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import datetime as dt
+import fcntl
+import glob
+import hashlib
+import io
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+from pathlib import Path, PurePosixPath
+from typing import Any, Iterable, Sequence
+from zoneinfo import ZoneInfo
+
+
+PROGRAM = "account-switch"
+
+
+def _display_zone() -> dt.tzinfo:
+    """Zone used to render timestamps. QUOTA_FALLBACK_TZ empty == this machine.
+
+    Upstream hard-coded Asia/Shanghai here, which is wrong for a published tool and
+    also drags in a tzdata dependency unconditionally. This follows the convention
+    the shell side of this repo already uses (see QUOTA_FALLBACK_TZ in lib/config.sh):
+    an empty value means this machine's local zone and needs no zone database at all.
+
+    A named zone with no tzdata installed FAILS LOUDLY here. That is deliberate: the
+    shell equivalent `TZ=<name> date` silently falls back to UTC on a host without
+    tzdata, so you get a plausible timestamp that is simply wrong by your offset --
+    and a wrong timestamp on a backup directory is how you roll back the wrong one.
+    Failing is recoverable; being quietly eight hours off is not.
+    """
+    name = os.environ.get("QUOTA_FALLBACK_TZ", "").strip()
+    if not name:
+        return dt.datetime.now().astimezone().tzinfo or dt.timezone.utc
+    try:
+        return ZoneInfo(name)
+    except Exception as exc:
+        raise SystemExit(
+            f"{PROGRAM}: QUOTA_FALLBACK_TZ={name!r} could not be resolved: {exc}\n"
+            f"{PROGRAM}: install the tzdata package, or leave QUOTA_FALLBACK_TZ "
+            f"empty to use this machine's local zone."
+        ) from exc
+MAX_FILE_BYTES = 8 * 1024 * 1024
+# Where to look for accounts. Two site-specific globs from the source deployment
+# were removed rather than generalised -- a published default that scans paths only
+# one installation has is not a default, it is a leak of that installation. Add your
+# own with --source, which is repeatable.
+DEFAULT_HOST_GLOBS = (
+    "/root",
+    "/home/*",
+)
+CONFIG_REL = Path(".claude.json")
+CREDENTIALS_REL = Path(".claude/.credentials.json")
+BACKUP_PREFIX = "claude-backup-before-"
+# Backups are written under <home>/BACKUP_DIR_NAME/. The READ side must scan both
+# that directory AND the older flat layout directly under $HOME, with no sunset date.
+# ⚠️ Incident: when the write location was tidied up, two accounts' credentials
+#    existed ONLY in the old flat location. Scanning just the new directory dropped
+#    the roster from five accounts to three, and one of the two that vanished was
+#    still in active use. Stray backup directories left by an earlier version -- or
+#    by a human -- are exactly the ones you cannot afford to stop seeing, so the old
+#    scan is kept permanently rather than deprecated.
+BACKUP_DIR_NAME = "claude-backups"
+
+# 🔴 Retention and what a backup is allowed to contain.
+#
+# The version this was extracted from kept every backup forever AND stored each
+# generation's credentials in plaintext. On the machine it came from that directory had
+# grown to 9.2 GB, holding the refresh token of every account that had ever been used,
+# including ones long since retired. ⭐ For a tool whose entire job is handling
+# credentials, "keep every generation in the clear and never clean up" is the one
+# default it must not ship with -- the blast radius of a single stray backup read is the
+# whole account history, and nothing ever shrinks it.
+#
+# So: backups are BOUNDED (pruned to BACKUP_KEEP_DEFAULT, oldest first) and by default
+# they DO NOT contain the token. What is kept instead is a fingerprint -- a hash plus
+# expiry and subscription -- which answers "which credential was this?" without being
+# the credential.
+#
+# ⚠️ The obvious objection is right and is handled explicitly, not waved away: if the
+#    outgoing account's credentials exist nowhere else, not keeping them destroys the
+#    only copy. Two things prevent that:
+#      * the in-transaction safety net does not read the backup at all. The outgoing
+#        bytes are held in memory for the length of the operation and written back on
+#        failure, so a failed switch is undone even with nothing on disk.
+#      * before a switch succeeds, the outgoing account must be reachable from at least
+#        one other readable location, or the switch is refused with instructions. See
+#        assert_outgoing_recoverable(). --backup-credentials=full is the informed opt-in.
+BACKUP_KEEP_DEFAULT = 5
+CREDENTIAL_MODES = ("fingerprint", "full", "none")
+MANIFEST_VERSION = 2
+
+
+class SwitchError(RuntimeError):
+    """An expected error that is safe to show the operator."""
+
+
+class UserCancelled(SwitchError):
+    """The operator quit the interactive menu."""
+
+
+@dataclasses.dataclass(frozen=True)
+class RawProfile:
+    config: bytes
+    credentials: bytes
+
+
+@dataclasses.dataclass(frozen=True)
+class UsageWindow:
+    name: str
+    utilization: str
+    reset_local: str
+
+
+@dataclasses.dataclass(frozen=True)
+class ProfileMetadata:
+    email: str
+    account_uuid: str
+    subscription: str
+    access_nonempty: bool
+    refresh_nonempty: bool
+    usage: tuple[UsageWindow, ...]
+    expires_at_ms: int = 0
+
+    @property
+    def usable(self) -> bool:
+        return self.access_nonempty and self.refresh_nonempty
+
+
+class ProfileSource:
+    kind = "unknown"
+
+    @property
+    def label(self) -> str:
+        raise NotImplementedError
+
+    @property
+    def identity(self) -> tuple[str, ...]:
+        raise NotImplementedError
+
+    def load(self) -> RawProfile:
+        raise NotImplementedError
+
+
+@dataclasses.dataclass(frozen=True)
+class HostSource(ProfileSource):
+    home: Path
+    kind = "host"
+
+    @property
+    def label(self) -> str:
+        return f"host:{self.home}"
+
+    @property
+    def identity(self) -> tuple[str, ...]:
+        try:
+            resolved = str(self.home.resolve())
+        except OSError:
+            resolved = str(self.home)
+        return (self.kind, resolved)
+
+    def load(self) -> RawProfile:
+        return RawProfile(
+            config=read_limited_file(self.home / CONFIG_REL),
+            credentials=read_limited_file(self.home / CREDENTIALS_REL),
+        )
+
+
+class BackupSource(HostSource):
+    kind = "backup"
+
+    @property
+    def label(self) -> str:
+        return f"backup:{self.home}"
+
+
+@dataclasses.dataclass(frozen=True)
+class DockerSource(ProfileSource):
+    container_id: str
+    container_name: str
+    home: str
+    docker_bin: str
+    kind = "docker"
+
+    @property
+    def label(self) -> str:
+        return f"docker:{self.container_name}:{self.home}"
+
+    @property
+    def identity(self) -> tuple[str, ...]:
+        return (self.kind, self.container_id, self.home)
+
+    def load(self) -> RawProfile:
+        return RawProfile(
+            config=docker_read_file(
+                self.docker_bin,
+                self.container_id,
+                str(PurePosixPath(self.home) / str(CONFIG_REL)),
+            ),
+            credentials=docker_read_file(
+                self.docker_bin,
+                self.container_id,
+                str(PurePosixPath(self.home) / str(CREDENTIALS_REL)),
+            ),
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class Candidate:
+    source: ProfileSource
+    metadata: ProfileMetadata | None
+    error: str = ""
+
+    @property
+    def selectable(self) -> bool:
+        return self.metadata is not None and self.metadata.usable
+
+
+def eprint(message: str) -> None:
+    print(message, file=sys.stderr)
+
+
+def read_limited_file(path: Path) -> bytes:
+    try:
+        stat_result = path.stat()
+    except FileNotFoundError as exc:
+        raise SwitchError(f"Missing {path}") from exc
+    except OSError as exc:
+        raise SwitchError(f"Cannot read {path}: {exc.strerror or exc}") from exc
+    if not path.is_file():
+        raise SwitchError(f"Not a regular file: {path}")
+    if stat_result.st_size > MAX_FILE_BYTES:
+        raise SwitchError(f"File exceeds the {MAX_FILE_BYTES} byte safety limit: {path}")
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise SwitchError(f"Cannot read {path}: {exc.strerror or exc}") from exc
+    if len(data) > MAX_FILE_BYTES:
+        raise SwitchError(f"File exceeds the {MAX_FILE_BYTES} byte safety limit: {path}")
+    return data
+
+
+def parse_json_object(data: bytes, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SwitchError(f"{label} is not valid JSON") from exc
+    if not isinstance(value, dict):
+        raise SwitchError(f"{label} must be a JSON object at the top level")
+    return value
+
+
+# Identity and credentials are read at FIXED PATHS. Upstream had two different ways of
+# answering "which account is this?" against the same file: this tool walked the whole
+# document and took the first key of a matching name anywhere in it, while the quota
+# reader anchored on the oauthAccount object (see quota_identity_read in lib/reading.sh).
+# Two answers to one question is not a redundancy, it is a disagreement waiting to
+# happen -- and the account guard downstream consumes whichever label it is handed.
+#
+# The unanchored readers are not merely deprecated here, they are deleted: .claude.json
+# carries arbitrary nested per-project state, so a first-match walk returns whatever the
+# dict happens to yield first, and a key of the same name appearing anywhere under it
+# silently wins. A reader that can be steered by unrelated data in the file it is
+# reading cannot be made safe by preferring a different reader alongside it.
+#
+# ⚠️ Note which field is NOT identity: cachedUsageUtilization.accountUuid is a
+#    cache-ownership marker that only refreshes after a usage query, so it legitimately
+#    lags a switch. Treating it as part of identity deadlocks: the guard wants it
+#    consistent before allowing traffic, it needs a usage query to update, and the usage
+#    query has to pass the guard. That deadlock has actually happened -- a successful
+#    automatic switch was then rejected as "identity-missing" and the system sat down
+#    for three hours. Panel-cache ownership is a separate question, answered elsewhere.
+CONFIG_IDENTITY_SECTION = "oauthAccount"
+CREDENTIALS_SECTION = "claudeAiOauth"
+
+
+def anchored_string(root: dict[str, Any], section: str, key: str) -> str:
+    node = root.get(section)
+    if not isinstance(node, dict):
+        return ""
+    value = node.get(key)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return ""
+
+
+def anchored_number(root: dict[str, Any], section: str, key: str) -> int:
+    node = root.get(section)
+    if not isinstance(node, dict):
+        return 0
+    value = node.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return int(value)
+
+
+def anchored_nonempty(root: dict[str, Any], section: str, key: str) -> bool:
+    return bool(anchored_string(root, section, key))
+
+
+def expires_text(expires_at_ms: int) -> str:
+    if expires_at_ms <= 0:
+        return "-"
+    moment = dt.datetime.fromtimestamp(expires_at_ms / 1000, _display_zone())
+    return moment.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def parse_iso_to_local(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return "-"
+    normalized = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = dt.datetime.fromisoformat(normalized)
+    except ValueError:
+        return value.strip()
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(_display_zone()).strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def parse_usage(config: dict[str, Any]) -> tuple[UsageWindow, ...]:
+    cached = config.get("cachedUsageUtilization")
+    if not isinstance(cached, dict):
+        return ()
+    utilization = cached.get("utilization")
+    if not isinstance(utilization, dict):
+        return ()
+    windows: list[UsageWindow] = []
+    preferred = ("five_hour", "seven_day")
+    ordered_names = list(preferred)
+    ordered_names.extend(
+        sorted(name for name in utilization if name not in set(preferred))
+    )
+    for name in ordered_names:
+        item = utilization.get(name)
+        if not isinstance(item, dict):
+            continue
+        raw_util = item.get("utilization")
+        util_text = "-" if raw_util is None else str(raw_util)
+        reset_text = parse_iso_to_local(item.get("resets_at"))
+        if util_text == "-" and reset_text == "-":
+            continue
+        windows.append(
+            UsageWindow(
+                name=name,
+                utilization=util_text,
+                reset_local=reset_text,
+            )
+        )
+    return tuple(windows)
+
+
+def parse_profile(raw: RawProfile) -> ProfileMetadata:
+    config = parse_json_object(raw.config, ".claude.json")
+    credentials = parse_json_object(
+        raw.credentials,
+        ".claude/.credentials.json",
+    )
+    email = (
+        anchored_string(config, CONFIG_IDENTITY_SECTION, "emailAddress")
+        or "(unknown account)"
+    )
+    account_uuid = anchored_string(config, CONFIG_IDENTITY_SECTION, "accountUuid")
+    subscription = (
+        anchored_string(credentials, CREDENTIALS_SECTION, "subscriptionType") or "-"
+    )
+    return ProfileMetadata(
+        email=email,
+        account_uuid=account_uuid,
+        subscription=subscription,
+        access_nonempty=anchored_nonempty(credentials, CREDENTIALS_SECTION, "accessToken"),
+        refresh_nonempty=anchored_nonempty(credentials, CREDENTIALS_SECTION, "refreshToken"),
+        usage=parse_usage(config),
+        expires_at_ms=anchored_number(credentials, CREDENTIALS_SECTION, "expiresAt"),
+    )
+
+
+def docker_command(
+    docker_bin: str,
+    args: Sequence[str],
+    *,
+    timeout: int = 12,
+) -> subprocess.CompletedProcess[bytes]:
+    try:
+        return subprocess.run(
+            [docker_bin, *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=timeout,
+        )
+    except FileNotFoundError as exc:
+        raise SwitchError(f"Docker command not found: {docker_bin}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise SwitchError("Read-only Docker probe timed out") from exc
+    except OSError as exc:
+        raise SwitchError(f"Docker command failed to start: {exc}") from exc
+
+
+def docker_read_file(docker_bin: str, container: str, path: str) -> bytes:
+    if not path.startswith("/") or "\n" in path or "\r" in path:
+        raise SwitchError(f"Unsafe Docker path: {path!r}")
+    result = docker_command(
+        docker_bin,
+        ("cp", f"{container}:{path}", "-"),
+    )
+    if result.returncode != 0:
+        raise SwitchError(f"Missing or unreadable inside Docker: {path}")
+    if len(result.stdout) > MAX_FILE_BYTES * 2:
+        raise SwitchError(f"Docker file archive too large: {path}")
+    try:
+        with tarfile.open(fileobj=io.BytesIO(result.stdout), mode="r:*") as archive:
+            regular = [member for member in archive.getmembers() if member.isfile()]
+            if len(regular) != 1:
+                raise SwitchError(f"Docker did not return a single regular file: {path}")
+            member = regular[0]
+            if member.size > MAX_FILE_BYTES:
+                raise SwitchError(f"Docker file exceeds the safety limit: {path}")
+            extracted = archive.extractfile(member)
+            if extracted is None:
+                raise SwitchError(f"Docker file read failed: {path}")
+            data = extracted.read(MAX_FILE_BYTES + 1)
+    except (tarfile.TarError, OSError) as exc:
+        raise SwitchError(f"Invalid Docker file archive: {path}") from exc
+    if len(data) > MAX_FILE_BYTES:
+        raise SwitchError(f"Docker file exceeds the safety limit: {path}")
+    return data
+
+
+def docker_containers(docker_bin: str) -> list[tuple[str, str]]:
+    result = docker_command(
+        docker_bin,
+        ("ps", "-a", "--format", "{{.ID}}\t{{.Names}}"),
+    )
+    if result.returncode != 0:
+        message = result.stderr.decode("utf-8", "replace").strip().splitlines()
+        detail = message[-1] if message else "docker ps failed"
+        raise SwitchError(f"Cannot list Docker containers: {detail[:200]}")
+    containers: list[tuple[str, str]] = []
+    for line in result.stdout.decode("utf-8", "replace").splitlines():
+        parts = line.split("\t", 1)
+        if len(parts) != 2:
+            continue
+        container_id, name = (part.strip() for part in parts)
+        if container_id and name:
+            containers.append((container_id, name))
+    return containers
+
+
+def docker_homes(docker_bin: str, container_id: str) -> list[str]:
+    homes = {"/root"}
+    try:
+        passwd_bytes = docker_read_file(docker_bin, container_id, "/etc/passwd")
+    except SwitchError:
+        return sorted(homes)
+    for line in passwd_bytes.decode("utf-8", "replace").splitlines():
+        fields = line.split(":")
+        if len(fields) < 7:
+            continue
+        home = fields[5].strip()
+        if home == "/root" or home.startswith("/home/"):
+            homes.add(home)
+    return sorted(homes)
+
+
+def parse_docker_source(
+    spec: str,
+    docker_bin: str,
+) -> DockerSource:
+    if ":" not in spec:
+        raise SwitchError(
+            f"--docker-source must be CONTAINER:/absolute/home: {spec}"
+        )
+    container, home = spec.split(":", 1)
+    container = container.strip()
+    home = home.strip()
+    if not container or not home.startswith("/") or any(ch in home for ch in "\r\n"):
+        raise SwitchError(f"Invalid --docker-source format: {spec}")
+    return DockerSource(
+        container_id=container,
+        container_name=container,
+        home=home,
+        docker_bin=docker_bin,
+    )
+
+
+def host_sources(
+    root_home: Path,
+    extra_sources: Sequence[str],
+    no_default_hosts: bool,
+) -> list[HostSource]:
+    patterns: list[str] = []
+    if not no_default_hosts:
+        configured = os.environ.get("ACCOUNT_SWITCH_HOST_GLOBS")
+        if configured is not None:
+            patterns.extend(part for part in configured.split(os.pathsep) if part)
+        else:
+            patterns.extend(DEFAULT_HOST_GLOBS)
+    patterns.extend(extra_sources)
+    if not no_default_hosts and str(root_home) not in patterns:
+        patterns.insert(0, str(root_home))
+
+    sources: list[HostSource] = []
+    seen: set[tuple[str, ...]] = set()
+    for pattern in patterns:
+        matches = sorted(glob.glob(pattern))
+        if not matches and not glob.has_magic(pattern):
+            matches = [pattern]
+        for match in matches:
+            source = HostSource(Path(match))
+            if source.identity in seen:
+                continue
+            seen.add(source.identity)
+            config = source.home / CONFIG_REL
+            credentials = source.home / CREDENTIALS_REL
+            if config.exists() or credentials.exists():
+                sources.append(source)
+    return sources
+
+
+def backup_sources(root_home: Path) -> list[BackupSource]:
+    sources: list[BackupSource] = []
+    entries: list[Path] = []
+    for base in (root_home, root_home / BACKUP_DIR_NAME):
+        try:
+            entries.extend(base.glob(f"{BACKUP_PREFIX}*"))
+        except OSError:
+            continue
+    entries.sort()
+    for path in entries:
+        if not path.is_dir():
+            continue
+        if (path / CONFIG_REL).exists() or (path / CREDENTIALS_REL).exists():
+            sources.append(BackupSource(path))
+    return sources
+
+
+def all_sources(args: argparse.Namespace) -> list[ProfileSource]:
+    sources: list[ProfileSource] = list(
+        host_sources(args.root_home, args.source, args.no_default_hosts)
+    )
+    seen = {source.identity for source in sources}
+
+    if not args.no_backups:
+        for backup_source in backup_sources(args.root_home):
+            if backup_source.identity in seen:
+                continue
+            seen.add(backup_source.identity)
+            sources.append(backup_source)
+
+    docker_sources: list[DockerSource] = []
+    for spec in args.docker_source:
+        docker_sources.append(parse_docker_source(spec, args.docker_bin))
+
+    if not args.no_docker:
+        try:
+            for container_id, name in docker_containers(args.docker_bin):
+                for home in docker_homes(args.docker_bin, container_id):
+                    docker_sources.append(
+                        DockerSource(
+                            container_id=container_id,
+                            container_name=name,
+                            home=home,
+                            docker_bin=args.docker_bin,
+                        )
+                    )
+        except SwitchError as exc:
+            if args.verbose:
+                eprint(f"⚠️ Docker scan skipped: {exc}")
+
+    for source in docker_sources:
+        if source.identity in seen:
+            continue
+        seen.add(source.identity)
+        sources.append(source)
+    return sources
+
+
+def discover_candidates(args: argparse.Namespace) -> list[Candidate]:
+    candidates: list[Candidate] = []
+    for source in all_sources(args):
+        try:
+            candidates.append(
+                Candidate(source=source, metadata=parse_profile(source.load()))
+            )
+        except SwitchError as exc:
+            candidates.append(Candidate(source=source, metadata=None, error=str(exc)))
+    return candidates
+
+
+KIND_PRIORITY = {"host": 2, "docker": 1, "backup": 0}
+
+
+def freshness_sort_key(candidate: Candidate) -> tuple[int, int, str]:
+    metadata = candidate.metadata
+    expires = metadata.expires_at_ms if metadata is not None else 0
+    return (
+        -expires,
+        -KIND_PRIORITY.get(candidate.source.kind, 0),
+        candidate.source.label,
+    )
+
+
+def is_current_root(candidate: Candidate, root_home: Path) -> bool:
+    source = candidate.source
+    return (
+        source.kind == "host"
+        and isinstance(source, HostSource)
+        and paths_same(source.home, root_home)
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class AccountGroup:
+    email: str
+    candidates: tuple[Candidate, ...]
+
+    @property
+    def best(self) -> Candidate | None:
+        for candidate in self.candidates:
+            if candidate.selectable:
+                return candidate
+        return None
+
+    @property
+    def shown(self) -> Candidate:
+        return self.best or self.candidates[0]
+
+
+def group_by_account(candidates: Sequence[Candidate]) -> list[AccountGroup]:
+    buckets: dict[str, list[Candidate]] = {}
+    for candidate in candidates:
+        if candidate.metadata is None:
+            continue
+        buckets.setdefault(candidate.metadata.email, []).append(candidate)
+    groups = [
+        AccountGroup(
+            email=email,
+            candidates=tuple(sorted(items, key=freshness_sort_key)),
+        )
+        for email, items in buckets.items()
+    ]
+    groups.sort(
+        key=lambda group: (
+            freshness_sort_key(group.candidates[0])[0],
+            group.email.lower(),
+        )
+    )
+    return groups
+
+
+def usage_summary(metadata: ProfileMetadata) -> str:
+    if not metadata.usage:
+        return "usage cache: none"
+    parts = []
+    for window in metadata.usage:
+        utilization = window.utilization
+        if utilization != "-" and not utilization.endswith("%"):
+            utilization += "%"
+        parts.append(
+            f"{window.name}={utilization}→{window.reset_local}"
+        )
+    return "; ".join(parts)
+
+
+def print_candidates(
+    groups: Sequence[AccountGroup],
+    invalid: Sequence[Candidate],
+    root_home: Path,
+    hidden_invalid: int = 0,
+) -> None:
+    print(
+        "Claude account candidates (copies of one account merged by credential "
+        "freshness; "
+        "usage figures are local cache and are not live server state)"
+    )
+    if not groups:
+        print("  no candidates found")
+    for index, group in enumerate(groups, 1):
+        shown = group.shown
+        metadata = shown.metadata
+        assert metadata is not None
+        current = any(
+            is_current_root(candidate, root_home)
+            for candidate in group.candidates
+        )
+        current_text = " [in use]" if current else ""
+        status = "✅ credentials present" if group.best is not None else (
+            "❌ no usable credentials"
+            f"(access={'present' if metadata.access_nonempty else 'empty'},"
+            f"refresh={'present' if metadata.refresh_nonempty else 'empty'})"
+        )
+        copies_text = (
+            f" | copies {len(group.candidates)}"
+            if len(group.candidates) > 1
+            else ""
+        )
+        print(
+            f"[{index}] {group.email}{current_text} | {status} | "
+            f"subscription={metadata.subscription}{copies_text}"
+        )
+        print(
+            f"    freshest: {shown.source.label} | "
+            f"expires {expires_text(metadata.expires_at_ms)}"
+        )
+        print(f"    {usage_summary(metadata)}")
+    for candidate in invalid:
+        print(
+            f"[!] unreadable | {candidate.source.label} | {candidate.error}"
+        )
+    if hidden_invalid:
+        print(
+            f"\nHid {hidden_invalid} unreadable candidate(s); "
+            "Use --show-invalid for diagnostics."
+        )
+
+
+def paths_same(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return os.path.abspath(left) == os.path.abspath(right)
+
+
+def require_best(group: AccountGroup) -> Candidate:
+    best = group.best
+    if best is None:
+        raise SwitchError(
+            "Candidate has an empty accessToken or refreshToken; refusing to switch"
+        )
+    return best
+
+
+def select_candidate(
+    groups: Sequence[AccountGroup],
+    candidates: Sequence[Candidate],
+    selector: str | None,
+    root_home: Path,
+) -> tuple[Candidate, bool]:
+    if not groups:
+        raise SwitchError("No Claude account candidates found")
+    if selector is None:
+        while True:
+            raw = input("Enter an index to switch (0/q to quit): ").strip()
+            if raw.lower() in {"0", "q", "quit", "exit"}:
+                raise UserCancelled("Cancelled")
+            if not raw.isdigit():
+                print("⚠️ Enter one of the listed numbers.")
+                continue
+            index = int(raw)
+            if not 1 <= index <= len(groups):
+                print(f"⚠️ Out of range; enter 1-{len(groups)}.")
+                continue
+            group = groups[index - 1]
+            best = group.best
+            if best is None:
+                print("⚠️ This account has no complete accessToken/refreshToken; cannot switch.")
+                continue
+            if is_current_root(best, root_home):
+                print("⚠️ That is already the account in use; choose another index.")
+                continue
+            print(
+                f"Selected [{index}] {group.email}, "
+                "Backing up and switching..."
+            )
+            return best, True
+
+    if selector.isdigit():
+        index = int(selector)
+        if not 1 <= index <= len(groups):
+            raise SwitchError(f"No such candidate: {selector}")
+        return require_best(groups[index - 1]), False
+
+    exact = [
+        candidate
+        for candidate in candidates
+        if candidate.source.label == selector
+    ]
+    if exact:
+        candidate = exact[0]
+        if candidate.metadata is None:
+            raise SwitchError(f"Invalid candidate: {candidate.error}")
+        if not candidate.metadata.usable:
+            raise SwitchError(
+                "Candidate has an empty accessToken or refreshToken; refusing to switch"
+            )
+        return candidate, False
+
+    matched = [
+        group for group in groups if group.email.lower() == selector.lower()
+    ]
+    if not matched:
+        raise SwitchError(f"No such candidate: {selector}")
+    return require_best(matched[0]), False
+
+
+def target_owner(root_home: Path) -> tuple[int, int]:
+    try:
+        stat_result = root_home.stat()
+    except OSError as exc:
+        raise SwitchError(f"Target home is unusable {root_home}: {exc}") from exc
+    if not root_home.is_dir():
+        raise SwitchError(f"Target home is not a directory: {root_home}")
+    return stat_result.st_uid, stat_result.st_gid
+
+
+class OperationLock:
+    def __init__(self, root_home: Path):
+        self.path = root_home / ".claude-account-switch.lock"
+        self.handle: io.TextIOWrapper | None = None
+
+    def __enter__(self) -> "OperationLock":
+        try:
+            fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+            self.handle = os.fdopen(fd, "r+", encoding="utf-8")
+            fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.handle.seek(0)
+            self.handle.truncate()
+            self.handle.write(f"pid={os.getpid()}\n")
+            self.handle.flush()
+        except BlockingIOError as exc:
+            if self.handle is not None:
+                self.handle.close()
+                self.handle = None
+            raise SwitchError("Another account switch is already running") from exc
+        except OSError as exc:
+            if self.handle is not None:
+                self.handle.close()
+                self.handle = None
+            raise SwitchError(f"Cannot acquire the switch lock {self.path}: {exc}") from exc
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        if self.handle is not None:
+            try:
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                self.handle.close()
+
+
+def timestamp_now() -> str:
+    override = os.environ.get("ACCOUNT_SWITCH_NOW")
+    if override:
+        return override
+    return dt.datetime.now(_display_zone()).strftime("%Y%m%d-%H%M%S")
+
+
+def unique_backup_dir(root_home: Path, reason: str) -> Path:
+    safe_reason = "".join(
+        char if char.isalnum() or char in "-_" else "-"
+        for char in reason
+    ).strip("-") or "operation"
+    stem = f"{BACKUP_PREFIX}{safe_reason}-{timestamp_now()}"
+    parent = root_home / BACKUP_DIR_NAME
+    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    candidate = parent / stem
+    counter = 1
+    while candidate.exists():
+        candidate = parent / f"{stem}-{counter:02d}"
+        counter += 1
+    return candidate
+
+
+def credential_fingerprint(data: bytes) -> dict[str, Any]:
+    """Identify a credential without retaining it.
+
+    sha256 over the file bytes, plus the two non-secret fields that make the answer
+    useful to a human reading a manifest. Nothing here can be turned back into a token.
+    """
+    try:
+        parsed = parse_json_object(data, str(CREDENTIALS_REL))
+    except SwitchError:
+        parsed = {}
+    return {
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "expiresAt": anchored_number(parsed, CREDENTIALS_SECTION, "expiresAt"),
+        "subscriptionType": anchored_string(
+            parsed, CREDENTIALS_SECTION, "subscriptionType"
+        ),
+    }
+
+
+def prune_backups(root_home: Path, keep: int) -> list[Path]:
+    """Delete this tool's own oldest backups beyond `keep`. Returns what was removed.
+
+    ⚠️ Scope is deliberately narrow: only directories this tool wrote, only inside
+    BACKUP_DIR_NAME, only ones whose name matches BACKUP_PREFIX. The older flat layout
+    directly under $HOME is READ but never pruned -- those directories may have been
+    left by an earlier version or by a person, and deleting someone else's data because
+    it looks like ours is not a cleanup, it is an incident. Names are timestamped, so
+    lexical order is chronological.
+    """
+    if keep < 0:
+        return []
+    parent = root_home / BACKUP_DIR_NAME
+    if not parent.is_dir():
+        return []
+    owned = sorted(
+        path
+        for path in parent.iterdir()
+        if path.is_dir() and path.name.startswith(BACKUP_PREFIX)
+    )
+    removed: list[Path] = []
+    for path in owned[: max(0, len(owned) - keep)]:
+        shutil.rmtree(path, ignore_errors=True)
+        removed.append(path)
+    return removed
+
+
+def copy_backup_file(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    shutil.copy2(source, destination)
+    os.chmod(destination, 0o600)
+
+
+def backup_current(
+    root_home: Path,
+    reason: str,
+    source_label: str,
+    credentials_mode: str = "fingerprint",
+    keep: int = BACKUP_KEEP_DEFAULT,
+) -> Path:
+    if credentials_mode not in CREDENTIAL_MODES:
+        raise SwitchError(f"Unknown credentials mode: {credentials_mode}")
+    uid, gid = target_owner(root_home)
+    backup = unique_backup_dir(root_home, reason)
+    try:
+        backup.mkdir(mode=0o700)
+        files: dict[str, bool] = {}
+        credentials_note: dict[str, Any] = {"mode": credentials_mode, "retained": False}
+        for relative in (CONFIG_REL, CREDENTIALS_REL):
+            target = root_home / relative
+            exists = target.is_file()
+            if relative == CREDENTIALS_REL:
+                # The token is copied only on an explicit opt-in. Otherwise the manifest
+                # records which credential this was, and the bytes stay where they were.
+                if exists and credentials_mode == "full":
+                    copy_backup_file(target, backup / relative)
+                    credentials_note["retained"] = True
+                elif exists and credentials_mode == "fingerprint":
+                    credentials_note["fingerprint"] = credential_fingerprint(
+                        read_limited_file(target)
+                    )
+                files[str(relative)] = exists and credentials_mode == "full"
+                credentials_note["existedAtBackupTime"] = exists
+                continue
+            files[str(relative)] = exists
+            if exists:
+                copy_backup_file(target, backup / relative)
+        manifest = {
+            "version": MANIFEST_VERSION,
+            "createdAt": dt.datetime.now(_display_zone()).isoformat(),
+            "targetRootHome": str(root_home),
+            "source": source_label,
+            "files": files,
+            "credentials": credentials_note,
+        }
+        manifest_path = backup / "manifest.json"
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.chmod(manifest_path, 0o600)
+        for directory in (backup, backup / ".claude"):
+            if directory.exists():
+                os.chmod(directory, 0o700)
+                try:
+                    os.chown(directory, uid, gid)
+                except PermissionError:
+                    if directory.stat().st_uid != uid:
+                        raise
+        for path in backup.rglob("*"):
+            try:
+                os.chown(path, uid, gid)
+            except PermissionError:
+                if path.stat().st_uid != uid:
+                    raise
+    except Exception as exc:
+        shutil.rmtree(backup, ignore_errors=True)
+        if isinstance(exc, SwitchError):
+            raise
+        raise SwitchError(f"Cannot back up the current state: {exc}") from exc
+    prune_backups(root_home, keep)
+    return backup
+
+
+def fsync_directory(path: Path) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def atomic_write_owned(
+    destination: Path,
+    data: bytes,
+    uid: int,
+    gid: int,
+) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.tmp-",
+        dir=destination.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            try:
+                os.fchown(handle.fileno(), uid, gid)
+            except PermissionError:
+                if os.fstat(handle.fileno()).st_uid != uid:
+                    raise
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+        fsync_directory(destination.parent)
+    except Exception:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def ensure_credentials_dir(root_home: Path, uid: int, gid: int) -> None:
+    directory = root_home / CREDENTIALS_REL.parent
+    try:
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(directory, 0o700)
+        try:
+            os.chown(directory, uid, gid)
+        except PermissionError:
+            if directory.stat().st_uid != uid:
+                raise
+    except OSError as exc:
+        raise SwitchError(f"Cannot prepare the credentials directory {directory}: {exc}") from exc
+
+
+def load_backup_manifest(backup: Path) -> dict[str, Any]:
+    manifest_path = backup / "manifest.json"
+    manifest = parse_json_object(
+        read_limited_file(manifest_path),
+        str(manifest_path),
+    )
+    # v1 is the pre-retention layout: it always stored the credential file, so its
+    # "files" map already says whether one is present. v2 adds the "credentials" note.
+    # Reading v1 is kept because backups written by the older version still exist on
+    # disk, and a rollback tool that cannot read yesterday's backups is not a rollback.
+    if manifest.get("version") not in (1, MANIFEST_VERSION) or not isinstance(
+        manifest.get("files"), dict
+    ):
+        raise SwitchError(f"Unsupported backup manifest format: {manifest_path}")
+    return manifest
+
+
+def restore_backup(root_home: Path, backup: Path) -> None:
+    manifest = load_backup_manifest(backup)
+    uid, gid = target_owner(root_home)
+    ensure_credentials_dir(root_home, uid, gid)
+    files = manifest["files"]
+
+    # A backup written without the token can still be rolled back, but only into a state
+    # where config and credentials agree. Restoring the config on its own would leave the
+    # identity saying one account while the token belongs to another -- the exact
+    # mismatch this project exists to detect, manufactured by its own rollback command.
+    # So it is checked, and refused with a way forward rather than half-applied.
+    note = manifest.get("credentials")
+    if isinstance(note, dict) and note.get("existedAtBackupTime") and not note.get(
+        "retained"
+    ):
+        recorded = note.get("fingerprint")
+        live = root_home / CREDENTIALS_REL
+        current = (
+            credential_fingerprint(read_limited_file(live)) if live.is_file() else None
+        )
+        if not isinstance(recorded, dict):
+            raise SwitchError(
+                f"{backup} was written with --backup-credentials=none, so there is "
+                "nothing to verify the restored config against. Switch to the account "
+                "you want with --use instead."
+            )
+        if current is None or current.get("sha256") != recorded.get("sha256"):
+            raise SwitchError(
+                f"{backup} does not contain credentials (mode "
+                f"{note.get('mode')!r}) and the credentials in place now are not the "
+                "ones it was taken with, so restoring its config alone would leave the "
+                "account identity and the token disagreeing. Use --use <email> to "
+                "switch back to that account instead, which installs a matching pair."
+            )
+
+    for relative in (CONFIG_REL, CREDENTIALS_REL):
+        relative_text = str(relative)
+        existed = files.get(relative_text)
+        if not isinstance(existed, bool):
+            raise SwitchError(f"Backup manifest is missing {relative_text}")
+        destination = root_home / relative
+        if relative == CREDENTIALS_REL and not existed:
+            # "not existed" in a v2 manifest can mean "not retained", not "was absent".
+            # Deleting the live token on that basis would log the user out to undo a
+            # config change. Only a manifest that positively recorded absence may unlink.
+            note_v2 = manifest.get("credentials")
+            if isinstance(note_v2, dict) and note_v2.get("existedAtBackupTime"):
+                continue
+        if existed:
+            source = backup / relative
+            data = read_limited_file(source)
+            parse_json_object(data, str(source))
+            atomic_write_owned(destination, data, uid, gid)
+        else:
+            try:
+                destination.unlink()
+                fsync_directory(destination.parent)
+            except FileNotFoundError:
+                pass
+
+
+def verify_target(root_home: Path, expected: RawProfile) -> ProfileMetadata:
+    actual = HostSource(root_home).load()
+    if actual.config != expected.config or actual.credentials != expected.credentials:
+        raise SwitchError("Byte-for-byte verification failed after the switch")
+    metadata = parse_profile(actual)
+    if not metadata.usable:
+        raise SwitchError("Post-switch non-empty credential check failed")
+    for path in (root_home / CONFIG_REL, root_home / CREDENTIALS_REL):
+        if path.stat().st_mode & 0o077:
+            raise SwitchError(f"Mode is not 0600 after the switch: {path}")
+    return metadata
+
+
+def confirm_switch(candidate: Candidate, assume_yes: bool) -> None:
+    if assume_yes:
+        return
+    assert candidate.metadata is not None
+    expected = candidate.metadata.email
+    print(f"About to switch to {expected}")
+    print(f"source: {candidate.source.label}")
+    answer = input(f"Type the full email address {expected} to confirm: ").strip()
+    if answer != expected:
+        raise SwitchError("Confirmation did not match; aborted")
+
+
+def assert_outgoing_recoverable(
+    args: argparse.Namespace,
+    outgoing: ProfileMetadata,
+) -> None:
+    """Refuse to switch away from an account whose credentials exist nowhere else.
+
+    This is what makes "do not retain the token by default" safe rather than merely
+    tidy. Switching copies FROM a source and never deletes it, so the incoming account
+    keeps its own copy; the one at risk is the OUTGOING account, whose credentials live
+    at the target home and are about to be overwritten. If that is the last readable
+    copy, dropping it from the backup would destroy a login to save a hash.
+
+    ⚠️ Deliberately NOT bypassed by --yes. --yes means "do not ask me to retype the
+    address", it does not mean "proceed through an irreversible data loss". The way past
+    this is --backup-credentials=full, which states what you are choosing.
+    """
+    if args.backup_credentials == "full":
+        return
+    if not outgoing.usable:
+        return
+    for candidate in discover_candidates(args):
+        if candidate.metadata is None or not candidate.metadata.usable:
+            continue
+        if isinstance(candidate.source, HostSource) and paths_same(
+            candidate.source.home,
+            args.root_home,
+        ):
+            continue
+        if candidate.metadata.email == outgoing.email:
+            return
+    raise SwitchError(
+        f"{outgoing.email} is about to be replaced and its credentials were not found "
+        "in any other readable location, so this backup would be the only copy. "
+        "Re-run with --backup-credentials=full to keep the token in the backup "
+        "(stored 0600, pruned with the rest), or leave that account reachable "
+        "somewhere else first."
+    )
+
+
+def switch_profile(
+    args: argparse.Namespace,
+    candidate: Candidate,
+) -> None:
+    assert candidate.metadata is not None
+    if isinstance(candidate.source, HostSource) and paths_same(
+        candidate.source.home,
+        args.root_home,
+    ):
+        raise SwitchError("The selected source is already the active configuration; nothing to switch")
+    confirm_switch(candidate, args.yes)
+
+    with OperationLock(args.root_home):
+        raw = candidate.source.load()
+        source_metadata = parse_profile(raw)
+        if not source_metadata.usable:
+            raise SwitchError("The source became unavailable during the pre-switch recheck; refusing to switch")
+
+        # The in-transaction safety net is these bytes, not the backup on disk. Held for
+        # the length of the operation and written back if anything below fails, so a
+        # failed switch is undone even when the backup deliberately holds no token.
+        try:
+            previous_raw: RawProfile | None = HostSource(args.root_home).load()
+        except SwitchError:
+            previous_raw = None
+        if previous_raw is not None:
+            try:
+                assert_outgoing_recoverable(args, parse_profile(previous_raw))
+            except SwitchError:
+                raise
+
+        backup = backup_current(
+            args.root_home,
+            "switch",
+            candidate.source.label,
+            args.backup_credentials,
+            args.keep,
+        )
+        uid, gid = target_owner(args.root_home)
+        ensure_credentials_dir(args.root_home, uid, gid)
+        try:
+            atomic_write_owned(args.root_home / CONFIG_REL, raw.config, uid, gid)
+            atomic_write_owned(
+                args.root_home / CREDENTIALS_REL,
+                raw.credentials,
+                uid,
+                gid,
+            )
+            target_metadata = verify_target(args.root_home, raw)
+        except Exception as exc:
+            try:
+                if previous_raw is not None:
+                    atomic_write_owned(
+                        args.root_home / CONFIG_REL, previous_raw.config, uid, gid
+                    )
+                    atomic_write_owned(
+                        args.root_home / CREDENTIALS_REL,
+                        previous_raw.credentials,
+                        uid,
+                        gid,
+                    )
+                else:
+                    restore_backup(args.root_home, backup)
+            except Exception as restore_exc:
+                raise SwitchError(
+                    f"Switch failed and the automatic restore also failed; the backup is kept at {backup}: {restore_exc}"
+                ) from exc
+            if isinstance(exc, SwitchError):
+                raise
+            raise SwitchError(f"Switch failed and was automatically restored: {exc}") from exc
+
+    print(f"✅ switched to {target_metadata.email}")
+    print(f"source: {candidate.source.label}")
+    print(f"backup: {backup}")
+    print("credentials: accessToken=non-empty, refreshToken=non-empty (contents never printed)")
+    print(f"credentials expire: {expires_text(target_metadata.expires_at_ms)}")
+    print(usage_summary(target_metadata))
+
+
+def backup_roots(root_home: Path) -> tuple[Path, Path]:
+    """Both places a backup can live: the old flat layout, and BACKUP_DIR_NAME."""
+    return (root_home, root_home / BACKUP_DIR_NAME)
+
+
+def backup_candidates(root_home: Path) -> list[Path]:
+    """Backups reachable by --rollback, newest first.
+
+    🔴 Inherited bug, fixed here. When backups moved from directly under $HOME into
+    BACKUP_DIR_NAME, the READ side was carefully updated -- but only one of the two
+    readers. Candidate discovery (backup_sources) learned about the new directory;
+    this one, which is what --rollback resolves against, kept globbing the old flat
+    layout alone. Effect upstream: every backup written after the move is invisible to
+    rollback, and "--rollback latest" quietly resolves to a stale pre-move backup
+    instead of reporting that it cannot see the recent ones.
+    ⭐ The lesson is not "someone forgot". It is that "update the read side" is only a
+    complete instruction if you can say how many readers there are -- one reader fixed
+    and one missed looks exactly like the job being done.
+    """
+    found: list[Path] = []
+    for base in backup_roots(root_home):
+        if not base.is_dir():
+            continue
+        found.extend(
+            path
+            for path in base.glob(f"{BACKUP_PREFIX}*")
+            if path.is_dir() and (path / "manifest.json").is_file()
+        )
+    return sorted(found, key=lambda path: path.stat().st_mtime_ns, reverse=True)
+
+
+def resolve_backup(root_home: Path, selector: str) -> Path:
+    backups = backup_candidates(root_home)
+    if selector == "latest":
+        if not backups:
+            raise SwitchError("No backup available to roll back to")
+        return backups[0]
+    candidate = Path(selector)
+    if not candidate.is_absolute():
+        candidate = root_home / candidate
+    try:
+        candidate_resolved = candidate.resolve(strict=True)
+        root_resolved = root_home.resolve(strict=True)
+    except OSError as exc:
+        raise SwitchError(f"Backup does not exist: {candidate}") from exc
+    allowed = {root_resolved}
+    nested = (root_home / BACKUP_DIR_NAME)
+    if nested.is_dir():
+        allowed.add(nested.resolve(strict=True))
+    if candidate_resolved.parent not in allowed:
+        raise SwitchError(
+            "A backup must sit directly under the target home or under its "
+            f"{BACKUP_DIR_NAME}/ directory to be rolled back"
+        )
+    if not candidate_resolved.name.startswith(BACKUP_PREFIX):
+        raise SwitchError("Directory name does not match the switch-backup format")
+    load_backup_manifest(candidate_resolved)
+    return candidate_resolved
+
+
+def rollback(args: argparse.Namespace, selector: str) -> None:
+    selected = resolve_backup(args.root_home, selector)
+    if not args.yes:
+        answer = input(f"Confirm rollback from {selected}? Type YES: ").strip()
+        if answer != "YES":
+            raise SwitchError("Rollback cancelled")
+    with OperationLock(args.root_home):
+        # Same rule as the switch path: the thing that undoes a failed rollback is these
+        # in-memory bytes, not the safety backup on disk. Otherwise the safety backup
+        # would have to hold the token to be worth anything, and "the recovery path
+        # needs it" is precisely how an unbounded plaintext credential store gets
+        # justified back into existence.
+        try:
+            previous_raw: RawProfile | None = HostSource(args.root_home).load()
+        except SwitchError:
+            previous_raw = None
+        safety_backup = backup_current(
+            args.root_home,
+            "rollback",
+            str(selected),
+            args.backup_credentials,
+            args.keep,
+        )
+        uid, gid = target_owner(args.root_home)
+        try:
+            restore_backup(args.root_home, selected)
+            metadata = parse_profile(HostSource(args.root_home).load())
+        except Exception as exc:
+            try:
+                if previous_raw is not None:
+                    atomic_write_owned(
+                        args.root_home / CONFIG_REL, previous_raw.config, uid, gid
+                    )
+                    atomic_write_owned(
+                        args.root_home / CREDENTIALS_REL,
+                        previous_raw.credentials,
+                        uid,
+                        gid,
+                    )
+                else:
+                    restore_backup(args.root_home, safety_backup)
+            except Exception as restore_exc:
+                raise SwitchError(
+                    "Rollback failed and restoring the pre-rollback state also failed; "
+                    f"safety backup kept at {safety_backup}: {restore_exc}"
+                ) from exc
+            if isinstance(exc, SwitchError):
+                raise
+            raise SwitchError(f"Rollback failed; the pre-rollback state was restored: {exc}") from exc
+    print(f"✅ rolled back from backup; current account: {metadata.email}")
+    print(f"rollback source: {selected}")
+    print(f"pre-rollback safety backup: {safety_backup}")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog=PROGRAM,
+        description=(
+            "Discover Claude Code accounts across host homes, Docker containers "
+            "and this tool's own switch backups. Copies of one account are merged "
+            "by credential freshness and shown with non-sensitive status only; the "
+            "freshest copy is the one installed. The current state is backed up "
+            "first and the target file is replaced atomically. The default action "
+            "is interactive selection."
+        ),
+    )
+    action = parser.add_mutually_exclusive_group()
+    action.add_argument(
+        "--list",
+        action="store_true",
+        help="List candidates read-only; do not switch",
+    )
+    action.add_argument(
+        "--use",
+        metavar="INDEX|EMAIL|SOURCE",
+        help="Switch by index, full email address, or full source label",
+    )
+    action.add_argument(
+        "--rollback",
+        nargs="?",
+        const="latest",
+        metavar="BACKUP|latest",
+        help="Roll back the given backup; omit the value for latest",
+    )
+    parser.add_argument(
+        "--source",
+        action="append",
+        default=[],
+        metavar="HOME",
+        help="Additionally scan a host home; repeatable",
+    )
+    parser.add_argument(
+        "--docker-source",
+        action="append",
+        default=[],
+        metavar="CONTAINER:/HOME",
+        help="Additionally scan an explicit container home; repeatable",
+    )
+    parser.add_argument(
+        "--no-default-hosts",
+        action="store_true",
+        help="Skip the default host home globs; use only --source",
+    )
+    parser.add_argument(
+        "--no-docker",
+        action="store_true",
+        help="Skip read-only Docker discovery",
+    )
+    parser.add_argument(
+        "--no-backups",
+        action="store_true",
+        help="Do not treat this tool's own switch backups as candidates",
+    )
+    parser.add_argument(
+        "--show-invalid",
+        action="store_true",
+        help="Show unreadable candidates (missing files, broken JSON); hidden by default",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the email/YES confirmation; for controlled automation",
+    )
+    parser.add_argument(
+        "--backup-credentials",
+        choices=CREDENTIAL_MODES,
+        default=os.environ.get("ACCOUNT_SWITCH_BACKUP_CREDENTIALS", "fingerprint"),
+        help=(
+            "What a backup keeps of the token. fingerprint (default): a hash plus "
+            "expiry, never the token. full: the credential file, 0600, still pruned. "
+            "none: neither, which also means that backup cannot be rolled back."
+        ),
+    )
+    parser.add_argument(
+        "--keep",
+        type=int,
+        default=int(
+            os.environ.get("ACCOUNT_SWITCH_KEEP", str(BACKUP_KEEP_DEFAULT)) or
+            BACKUP_KEEP_DEFAULT
+        ),
+        metavar="N",
+        help=(
+            f"How many of this tool's own backups to keep (default {BACKUP_KEEP_DEFAULT}); "
+            "older ones are deleted after each new backup. Backups in the older flat "
+            "layout under $HOME are read but never pruned."
+        ),
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show diagnostics, such as why Docker probing was skipped",
+    )
+    parser.add_argument(
+        "--root-home",
+        type=Path,
+        default=Path(os.environ.get("ACCOUNT_SWITCH_ROOT_HOME", "/root")),
+        metavar="HOME",
+        help=(
+            "The home directory whose account gets switched (default /root, or "
+            "ACCOUNT_SWITCH_ROOT_HOME). Upstream hid this flag; it is exposed here "
+            "because it is the only way to exercise this tool against a scratch "
+            "directory instead of your live login, and a safety valve nobody can see "
+            "is one nobody uses."
+        ),
+    )
+    parser.add_argument(
+        "--docker-bin",
+        default=os.environ.get("ACCOUNT_SWITCH_DOCKER_BIN", "docker"),
+        help=argparse.SUPPRESS,
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    args.root_home = args.root_home.absolute()
+    try:
+        if args.rollback is not None:
+            rollback(args, args.rollback)
+            return 0
+
+        discovered = discover_candidates(args)
+        parseable = [
+            candidate
+            for candidate in discovered
+            if candidate.metadata is not None
+        ]
+        invalid = [
+            candidate for candidate in discovered if candidate.metadata is None
+        ]
+        groups = group_by_account(parseable)
+        shown_invalid = invalid if args.show_invalid else []
+        hidden_invalid = 0 if args.show_invalid else len(invalid)
+        print_candidates(groups, shown_invalid, args.root_home, hidden_invalid)
+        if args.list:
+            return 0 if groups else 1
+        selected, selected_from_menu = select_candidate(
+            groups,
+            parseable,
+            args.use,
+            args.root_home,
+        )
+        if selected_from_menu:
+            args.yes = True
+        switch_profile(args, selected)
+        return 0
+    except UserCancelled as exc:
+        print(exc)
+        return 0
+    except SwitchError as exc:
+        eprint(f"❌ {exc}")
+        return 1
+    except EOFError:
+        eprint("❌ input ended; aborted")
+        return 1
+    except OSError as exc:
+        eprint(f"❌ filesystem operation failed: {exc}")
+        return 1
+    except KeyboardInterrupt:
+        eprint("\n❌ aborted")
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

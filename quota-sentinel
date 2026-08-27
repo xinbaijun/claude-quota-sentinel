@@ -62,6 +62,8 @@ source "$QS_ROOT/lib/reading.sh" || exit 1
 source "$QS_ROOT/lib/monitor.sh" || exit 1
 # shellcheck source=lib/detect.sh
 source "$QS_ROOT/lib/detect.sh" || exit 1
+# shellcheck source=lib/switch.sh
+source "$QS_ROOT/lib/switch.sh" || exit 1
 # shellcheck source=lib/state.sh
 source "$QS_ROOT/lib/state.sh" || exit 1
 
@@ -373,9 +375,12 @@ usage: quota-sentinel <command>
                     exercise one detector against a text file (kind: menu|banner|reset)
   env               print the resolved configuration and paths
   deps              check required and optional commands
+  switches [--json] [N]
+                    the switch ledger: what was decided, when, and why
 
-  Not in this milestone: account switching and the switch ledger.
-  本里程碑尚未包含：切号与切号流水账。
+  Switching is governed by QUOTA_SWITCH_MODE (off | dry-run | on); the default is
+  dry-run, which decides and records without touching any credentials.
+  切号由 QUOTA_SWITCH_MODE 控制（off | dry-run | on），默认 dry-run：只判定、只记账，不动凭据。
 USAGE
 }
 
@@ -389,6 +394,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     detect)          shift; quota_cmd_detect "$@" ;;
     env)             quota_cmd_env ;;
     deps)            quota_require_deps && echo "all required commands present" ;;
+    switches)        shift; quota_cmd_switches "$@" ;;
     # Hidden entry points: called only by this script's own async workers and the
     # dedicated monitor session. Not part of the human-facing surface.
     # 隐藏入口：只供本脚本的异步 worker / 专用 monitor 调用，不属于人工操作面。

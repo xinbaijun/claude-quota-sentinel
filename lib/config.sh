@@ -136,6 +136,30 @@ QUOTA_MONITOR_CLEAR_EVERY="${QUOTA_MONITOR_CLEAR_EVERY:-0}"
 # 所以让出这几个点是划算的（周额度就完全相反，等不回来，所以周线仍是 99）。
 QUOTA_SWITCH_PCT_FIVE="${QUOTA_SWITCH_PCT_FIVE:-90}"
 QUOTA_SWITCH_PCT_WEEK="${QUOTA_SWITCH_PCT_WEEK:-99}"
+
+# off | dry-run | on.
+# 🔴 The default is dry-run, and that is a deliberate choice rather than timidity. On
+#    an install that has just been pointed at a machine, this tool has not yet been
+#    seen to discover the right set of accounts -- and its action is to rewrite the
+#    credentials of a live login. Deciding and recording without acting lets you read
+#    `quota-sentinel switches` and check the decisions it WOULD have made against what
+#    you would have done. Flipping to `on` is one variable, once you agree with it.
+#    An automatic credential change that happens before the operator has ever seen the
+#    candidate list is not a feature, it is a surprise with a rollback attached.
+# off | dry-run | on。默认 dry-run 是有意为之,不是保守:刚装上时它还没被验证过能发现
+#    正确的账号集合,而它的动作是改写一个在用登录的凭据。先判定、先记账、不动手,
+#    你就能用 `quota-sentinel switches` 核对它「本来会怎么切」。认可之后改一个变量即可。
+QUOTA_SWITCH_MODE="${QUOTA_SWITCH_MODE:-dry-run}"
+
+# The switch ledger. Append-only JSONL: one line per decision, including the ones that
+# decided NOT to switch. See lib/switch.sh for why the non-events are recorded too.
+# 切号流水账。只追加的 JSONL,每个决定一行,**包括决定不切的那些**;理由见 lib/switch.sh。
+QUOTA_SWITCH_LEDGER="${QUOTA_SWITCH_LEDGER:-$QS_STATE_DIR/switches.jsonl}"
+
+# The tool that performs the credential move. Separate process on purpose: this half
+# never reads a token, which is why `ps` cannot show one during a switch.
+# 真正搬凭据的工具。刻意分成独立进程:本侧从不读 token,所以切号过程中 `ps` 看不到它。
+QUOTA_ACCOUNT_SWITCH_BIN="${QUOTA_ACCOUNT_SWITCH_BIN:-$QS_ROOT/account-switch}"
 QUOTA_NEAR_PCT="${QUOTA_NEAR_PCT:-90}"          # at or above this, phase is recorded as `near` (a label only; it no longer changes cadence) / ≥ 此值 phase 记为 near（只是状态标记，不再影响轮询节奏）
 # The local panel is sampled every 10s; the cadence that actually triggers a
 # `/usage` network request is tiered by level separately.
