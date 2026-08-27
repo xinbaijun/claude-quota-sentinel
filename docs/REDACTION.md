@@ -149,34 +149,53 @@ answer down** rather than leaving the scanner's silence to speak for it.
 以及一条把某个名字举例出来、等于披露它在内部命令名单上的注释），两处均已修。
 **正则永远抓不到它们。**
 
-### Known residue — must be settled before going public / 已知残留：转 public 前必须结清
+### Settled residue — internal command names in git history / 已结清：git 历史里的内部命令名
 
-🔴 **One internal tool's command name survives in this repository's git history**, in
-two ranges:
+✅ **SETTLED 2026-08-27 by a history rewrite** (`git filter-branch` + force-push),
+authorised by the repository owner for this repository only.
+✅ **2026-08-27 以历史重写结清**（`git filter-branch` + force-push），经仓主逐条授权，
+授权范围仅限本仓。
 
-| range / 范围 | what / 什么 |
-|---|---|
-| **B** — blobs | two historical versions of `README.md` (4 hits) |
-| **C** — commit message | one commit message body (1 hit) |
+Three internal command names survived in history after the working tree had been
+cleaned. **They were not all found the same way, and the difference is the point:**
 
-The working tree itself is clean; the name was removed from `README.md` and replaced
-with a description of the behaviour, which loses no information for a public reader
-(they do not have that tool, so the name was worth nothing to them anyway).
+| name | range / 范围 | where / 位置 | found by / 谁查出来的 |
+|---|---|---|---|
+| the git wrapper | **B** blobs | two historical `README.md` versions (4 hits) | **scanner** — it is a regex-safe token, so it is in the content layer |
+| the git wrapper | **C** message | one commit message body (1 hit) | **scanner** — same reason |
+| the dashboard command | **B** blobs | one historical `lib/config.sh` (2 hits) | **human review** — an ordinary English word, see above |
+| the lookup command | **B** blobs | one historical `tools/cleanroom-assert.sh` (1 hit) | **human review** — same |
 
-Removing it from **history** has exactly two options — **accept it**, or **rewrite
-history**. Rewriting history is irreversible and lands on someone's own hosted
-repository, so it is not a decision this tooling makes. **It is open, and it is
-deliberately recorded here rather than left as an undocumented old debt.**
+⭐ **The scanner found the first two and was structurally blind to the last two.** It
+did not fail; those tokens cannot be in the content layer without firing on dozens of
+legitimate English uses. This is the limitation written down two sections above,
+observed a second time in practice. **Do not read a CLEAN scan as "history contains no
+internal names" — read it as "history contains none of the tokens that are safe to
+regex."** The rest is a review obligation, and it does not expire.
+⭐ **前两处是扫描器查出来的，后两处它结构性看不见。**这不是扫描器坏了：那两个 token 进
+内容层就会在几十处正当英文用法上误报。这正是上面两节写下的那条限制第二次被实测。
+**不要把 CLEAN 读成「历史里没有内部名字」，只能读成「历史里没有那些可以安全写成正则的
+token」**；其余部分是人工复核的义务，而这条义务不会过期。
 
-⚠️ Settle **both ranges together**. Fixing only the commit message leaves four hits in
-the blobs, and a reader who checks range C alone will believe it is done.
+**How the 2026-08-27 human pass was made complete, and where it stops / 那一遍人工复核
+怎么做到穷尽的，以及它的边界**: every blob ever committed was diffed against its tip
+version; only lines that exist in history *but not at the tip* can carry a residue the
+tip review already cleared, and there were 63 such lines in total, every one read by
+eye. All six commit messages were read in full.
+⚠️ **What this does not cover**: a token that appears *identically* at the tip and in
+history. That is a range-A question about current content, not a history question, and
+it is answered by reviewing the tip — not by this pass.
+⚠️ **它覆盖不到什么**：在 tip 与历史里**逐字相同**出现的 token。那是关于当前内容的范围 A
+问题，不是历史问题，要靠复核 tip 来回答，不靠这一遍。
 
-🔴 **一个内部工具的命令名仍留在本仓 git 历史里**，落在两个范围：范围 B（`README.md` 的
-两个历史版本，4 处）与范围 C（一条 commit message，1 处）。工作树本身是干净的。
-从**历史**里去掉它只有两条路——**接受现状**或**重写历史**；后者不可逆、且落在别人自己的
-托管仓上，不是这套工具该做的决定。**此项开着，刻意记在这里，而不是留成一笔没人记得的旧账。**
-⚠️ **两个范围要一起结清**：只改 commit message 会在 blob 里留下 4 处，而只查范围 C 的人
-会以为已经完事。
+**Fidelity of the rewrite / 重写的保真性**: the tip tree object is byte-identical before
+and after (same tree SHA), and every author/committer name, email and date was
+preserved. Only history changed; no content did.
+⚠️ **The four newest commit SHAs changed.** Any document citing the pre-rewrite SHAs
+needs the old→new mapping; it is recorded in the rewrite report rather than here, and
+the pre-rewrite history is preserved in a git bundle held outside this repository.
+⚠️ **最新四个 commit 的 SHA 已变**，引用旧 SHA 的文档需按映射表换算；映射表记在重写报告
+里，重写前的历史另存为仓外的 git bundle。
 
 ⚠️ Site-specific patterns — the real names, your internal hostnames, your private repo
 name — go in `tools/dod4-*.local.txt`, which is gitignored. They must never go in the
