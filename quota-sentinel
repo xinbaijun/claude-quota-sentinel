@@ -83,6 +83,17 @@ quota_require_deps() {
   for c in tmux curl flock; do
     command -v "$c" >/dev/null 2>&1 || optional_missing+=("$c")
   done
+  # python3 is required only by the switching half (account-switch is a Python program),
+  # and only when switching can actually act. Checking it here, by name, is the
+  # difference between "python3 is missing, install it" and the shebang's
+  # `env: 'python3': No such file or directory` surfacing from inside a switch attempt
+  # -- at which point the reader has to work out which of two programs was even talking.
+  # python3 只被切号那一半需要（account-switch 是 Python 程序），且只在切号真会动手时。
+  # 在这里按名字检查，与让 shebang 抛出 `env: 'python3': 找不到` 的差别在于：后者是在一次
+  # 切号尝试内部冒出来的，读的人还得先分辨是哪个程序在说话。
+  if [[ "${QUOTA_SWITCH_MODE:-dry-run}" != "off" ]]; then
+    command -v python3 >/dev/null 2>&1 || optional_missing+=("python3")
+  fi
   if (( ${#missing[@]} )); then
     printf 'quota-sentinel: missing required command(s): %s\n' "${missing[*]}" >&2
     printf '  install them and try again; see README.md "Requirements".\n' >&2
@@ -92,6 +103,7 @@ quota_require_deps() {
     printf 'quota-sentinel: missing command(s) needed by parts of this tool: %s\n' \
       "${optional_missing[*]}" >&2
     printf '  tmux -> the /usage panel reader; curl -> the OAuth reader; flock -> concurrency locks.\n' >&2
+    printf '  python3 (>=3.9) -> account-switch, i.e. the switching half; without it reading and recording still work.\n' >&2
     printf '  Commands that do not need them still work. See README.md "Requirements".\n' >&2
   fi
   return 0

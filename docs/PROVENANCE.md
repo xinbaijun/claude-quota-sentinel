@@ -35,6 +35,36 @@ false. See README.md "Provenance" for the standing rule.
 文件与本文件声称的 commit 对不上，**而且这种错不会报错**：复制成功、照样能跑，
 唯一的表现是本文件在很久以后变成了假话。
 
+### Checking the mapping is *complete*, not just correct / 核的是覆盖面，不是条目对不对
+
+🔴 Spot-checking rows tells you whether the rows that are here are right. It cannot tell
+you whether a function is **missing** a row — and that is the failure this document has
+already had once. So the `account-switch` mapping below is written as a rule plus
+exceptions, which makes the completeness question answerable by running something:
+
+```sh
+# every name in account-switch that is NOT in the baseline must appear in the
+# "new in this milestone" list below; output should contain nothing else.
+python3 - <<'EOF'
+import ast
+names = lambda p: {n.name for n in ast.walk(ast.parse(open(p).read()))
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+new  = names("account-switch")
+base = names("/tmp/baseline.py")   # git show e2f32279:scripts/claude-account-switch > /tmp/baseline.py
+print("unmapped (must match the NEW list):", sorted(new - base))
+print("dropped  (must match the DROPPED list):", sorted(base - new))
+EOF
+```
+
+⚠️ Use the AST, not a line scan. A `def name(` … `) -> None:` signature spread over
+several lines puts its closing paren in column 0, so "a block ends at the next
+unindented line" truncates the function to its signature and reports a rewritten body as
+untouched. That was measured here, on `switch_profile`, and it produced a clean-looking
+"everything accounted for" that was wrong.
+⚠️ 用 AST，不要按行扫。多行签名的 `) -> None:` 落在第 0 列，「块到下一个不缩进的行为止」
+会把函数截断到签名，于是**被改写的函数体会被报成没动过**——本仓在 `switch_profile` 上
+实测到过，而且它给出的是一份看起来很干净的「全部对上了」。
+
 ## Baseline fingerprints / 基线指纹
 
 Recorded so that "which version was this taken from" stays answerable even if the
@@ -204,6 +234,105 @@ be able to see immediately that it is a fact, not a gap in this document.
 | `quota_require_deps` | `quota-sentinel` | up-front dependency check. A missing `jq` otherwise surfaces as a reading that is quietly always empty, which is indistinguishable from "this account has no quota data" / 少了 `jq` 的表现是读数恒空，与「这个账号没有额度数据」长得一模一样 |
 | `quota_cmd_env` | `quota-sentinel` | prints the resolved configuration; every "it does not work on my machine" so far came down to a path or an offset resolving somewhere unexpected / 打印解析后的配置 |
 | `quota_usage_text` | `quota-sentinel` | the usage text, which also states what this milestone does **not** include / 用法文本，同时写明本里程碑**不**含什么 |
+
+### `account-switch`  ←  `scripts/claude-account-switch` (whole file)
+
+Extracted with `git show e2f32279:scripts/claude-account-switch`, never copied from a
+working tree. Verified: the retrieved bytes are 1245 lines, sha256 `e2d758bcf19f…`,
+matching the fingerprint recorded above.
+
+**The mapping is stated as a rule plus its exceptions, not as a 72-row table** — a table
+that long is not read, and the reverse check that actually matters ("is any function
+unmapped?") is one someone should be able to *run*, not eyeball.
+
+> **Rule.** Every function, class and method in `account-switch` maps 1:1, by name, to
+> the same-named one in the baseline, **unless it appears in a list below.**
+
+Counted by AST over both files, so multi-line signatures and nested methods are included
+(a line-based count silently truncates `def switch_profile(\n …\n) -> None:` at the
+closing paren and reports the body as unchanged — measured, and wrong, before switching
+to the AST):
+
+| bucket / 分类 | count | meaning |
+|---|---|---|
+| byte-identical to baseline | 28 | carried across untouched |
+| English runtime output only | 21 | no behaviour change; includes `print_candidates`, whose implicit string concatenation re-wrapped across a different number of lines (verified: 0 of its 29 changed lines lack a string literal) |
+| mechanical rename only | 3 | `expires_text`, `parse_usage`, `timestamp_now` — `SHANGHAI` → `_display_zone()`, `parse_iso_to_shanghai` → `parse_iso_to_local`, `CLAUDE_ACCOUNT_SWITCH_*` → `ACCOUNT_SWITCH_*` |
+| **logic changed** | 11 | listed below — these are what a reviewer has to actually read |
+| **new in this milestone** | 9 | listed below |
+| **dropped from baseline** | 5 | listed below |
+| accounted for | **72 of 72** | |
+
+**Logic changed / 逻辑改动**
+
+| function | baseline | here | why |
+|---|---|---|---|
+| `parse_profile` | 302 | 376 | reads identity at fixed paths instead of searching the document — see "two readers, one question" below |
+| `backup_current` | 820 | 958 | credential mode + manifest v2 + prune |
+| `load_backup_manifest` | 929 | 1087 | accepts v1 (pre-retention) and v2 |
+| `restore_backup` | 940 | 1104 | refuses a restore that would leave config and token disagreeing |
+| `switch_profile` | 989 | 1229 | recoverability guard; in-memory undo instead of restoring from the backup |
+| `rollback` | 1075 | 1368 | same in-memory undo |
+| `backup_candidates` | 1041 | 1313 | 🔴 **inherited bug fixed** — scanned only the old flat layout, so `--rollback` could not see any backup written after they moved into `claude-backups/` |
+| `resolve_backup` | 1053 | 1339 | accepts the nested location too (same bug) |
+| `backup_sources` | 472 | 544 | a fingerprint-mode backup is not a candidate and not damaged; it must not be reported as unreadable |
+| `docker_homes` | 397 | 473 | dropped a site-specific path prefix |
+| `build_parser` | 1106 | 1422 | `--backup-credentials`, `--keep`; `--root-home` un-hidden |
+
+**New / 本里程碑新写**
+
+`_display_zone` (41) · `anchored_string` (300) · `anchored_number` (310) ·
+`anchored_nonempty` (320) · `parse_iso_to_local` (331) · `credential_fingerprint` (906) ·
+`prune_backups` (925) · `assert_outgoing_recoverable` (1190) · `backup_roots` (1308)
+
+**Dropped, and why / 删掉了什么，为什么 — two readers, one question**
+
+`walk_values`, `first_string`, `first_number`, `token_nonempty`, `parse_iso_to_shanghai`.
+
+The first four are one mechanism: *search the whole JSON document and take the first key
+of a matching name.* Upstream used it to answer "which account is this?", while the
+quota reader answered the same question by anchoring on `oauthAccount`. Two answers to
+one question is not redundancy, it is a disagreement waiting to happen — and the account
+guard downstream consumes whichever label it is handed.
+
+They are **deleted, not deprecated**: `.claude.json` carries arbitrary nested
+per-project state, so a first-match walk returns whatever the structure happens to yield
+first. Demonstrated with a synthetic fixture — a same-named key under `projects` makes
+the old reader report **a different account than the one actually logged in**, while the
+anchored reader is unaffected. A reader that unrelated data in the same file can steer
+is not made safe by putting a better reader beside it.
+
+⚠️ Which field is *not* identity: `cachedUsageUtilization.accountUuid` is a cache-ownership
+marker that only refreshes after a usage query, so it legitimately lags a switch.
+
+**Incident comments carried across / 事故注释的去向**
+
+| | count |
+|---|---|
+| incident comment blocks in the baseline | **1** (lines 45–50) |
+| carried across, rewritten | **1** |
+| dropped | **0** |
+| account aliases inside them | 3 occurrences, all in that one block, all rewritten |
+
+⚠️ The baseline of this particular file has **7 comment lines in total** — it is not the
+comment-dense source that `sentinel-quota` is, so "1 of 1" is the whole population here,
+not a sample. The alias figures quoted elsewhere in this repo's history (≈50) describe
+`sentinel-quota` and `fleet-env.sh`, not this file. The one block was rewritten rather
+than deleted, because deleting it would have removed the finding along with the names:
+it records that two accounts' credentials existed **only** in the older backup location,
+so narrowing the scan dropped the roster from five accounts to three — and one of the
+two that vanished was still in use.
+
+### `lib/switch.sh`  ←  written for this repository, plus one restored call site
+
+No upstream file corresponds to `lib/switch.sh`. Upstream's switching logic lived inline
+inside `quota_poll_once`; this milestone implements the decision half against the seam
+`lib/state.sh` already exposes (`if declare -F quota_decide_once`).
+
+⚠️ One thing here is not new: `quota_account_switch_record` was already **called** from
+`lib/state.sh` by the previous milestone, with no definition anywhere in the repo. The
+call sat on the external-drift path, so it would have fired the first time somebody
+switched accounts by hand. Defining it closes that.
 
 ### `account-probe`  ←  `scripts/claude-account-probe`
 

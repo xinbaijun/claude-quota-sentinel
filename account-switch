@@ -553,6 +553,25 @@ def backup_sources(root_home: Path) -> list[BackupSource]:
     for path in entries:
         if not path.is_dir():
             continue
+        # A backup taken in fingerprint/none mode holds no credential file by design.
+        # It is not a switch candidate and it is not damaged, so it must not be counted
+        # as one: with the default mode every backup this tool takes would otherwise
+        # show up forever as an "unreadable candidate". ⭐ A known-empty slot reported as
+        # a fault is how a diagnostic channel fills with noise it generated itself, and
+        # a channel that is always noisy is one nobody reads on the day it matters.
+        # 指纹/none 模式的备份按设计就没有凭据文件:它不是候选,也不是坏了,不能算成坏的
+        # ——否则默认模式下本工具写的每个备份都会永远以「无法读取的候选」出现。
+        if not (path / CREDENTIALS_REL).exists():
+            manifest_path = path / "manifest.json"
+            if manifest_path.is_file():
+                try:
+                    note = parse_json_object(
+                        read_limited_file(manifest_path), str(manifest_path)
+                    ).get("credentials")
+                except SwitchError:
+                    note = None
+                if isinstance(note, dict) and not note.get("retained"):
+                    continue
         if (path / CONFIG_REL).exists() or (path / CREDENTIALS_REL).exists():
             sources.append(BackupSource(path))
     return sources

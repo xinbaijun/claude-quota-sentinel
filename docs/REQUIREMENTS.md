@@ -83,10 +83,57 @@ when something fails.
 
 | what / 什么 | note / 说明 |
 |---|---|
-| `python3` | **verified by removal**: with `python3` made unusable inside a clean sandbox, `deps`, `status` and every detector still run. It becomes required when account switching lands (that tool is Python). / **靠移除验证过**：在干净沙箱里让 `python3` 不可用后，`deps`、`status` 与全部判据照常。切号落地后它才成为必需（那个工具是 Python 写的）。 |
-| `tzdata` | **verified by removal**: with `/usr/share/zoneinfo` emptied, this tool runs and honestly reports the host's actual offset. It does not consult a time-zone database at all — see below. It becomes required when account switching lands (that tool calls `ZoneInfo` at import time, so a missing `tzdata` is an **import-time crash**, not a late failure). / **靠移除验证过**：清空 `/usr/share/zoneinfo` 后本工具照常跑，并如实报出宿主的真实偏移量。它根本不查时区库——见下。切号落地后它才成为必需（那个工具在 import 期就调 `ZoneInfo`，缺 `tzdata` 是**导入期崩**，不是跑到那行才崩）。 |
+| ~~`python3`~~ | **superseded — account switching has landed.** See "Required for the switching half" below. The earlier finding still holds for everything else: with `python3` unusable, `deps`, `status` and every detector run normally. / **已被取代——切号已落地**，见下方「切号那一半需要」。其余部分的旧结论不变。 |
+| ~~`tzdata`~~ | **superseded — and the prediction it made turned out not to apply.** See "Required for the switching half" below. / **已被取代，而且它当时的预测并不成立**，见下方那节。 |
 | `docker` | only the container liveness probe used it, and that is not extracted / 只有容器可用性探测用它，而那部分未抽取 |
 | `git` | only the original regression suite used it, and that is a later milestone / 只有原回归套件用它，那是后续里程碑 |
+
+## Required for the switching half / 切号那一半需要
+
+Reading and recording quota needs nothing here. Only `account-switch` — the program
+that actually moves credentials — does.
+
+| what / 什么 | when / 何时需要 | check / 怎么查 |
+|---|---|---|
+| `python3` **≥ 3.9** | whenever `QUOTA_SWITCH_MODE` is not `off`. 3.9 is the floor because `zoneinfo` arrived in 3.9. / 只要 `QUOTA_SWITCH_MODE` 不是 `off`。3.9 是下限，因为 `zoneinfo` 从 3.9 才有。 | `python3 --version`, or `quota-sentinel deps` |
+| `tzdata` | **only if you set `QUOTA_FALLBACK_TZ` to a zone name.** Leave it empty — the default — and no time-zone database is consulted at all. / **仅当你把 `QUOTA_FALLBACK_TZ` 设成区域名时**。留空（默认）就完全不查时区库。 | `python3 -c "from zoneinfo import ZoneInfo; ZoneInfo('Asia/Shanghai')"` |
+
+### The `tzdata` story changed, and the change is the point / `tzdata` 这条变了，而变化本身才是重点
+
+An earlier revision of this file predicted that a missing `tzdata` would be an
+**import-time crash**, because the program it describes called `ZoneInfo("Asia/Shanghai")`
+at module top level. That was an accurate reading of the code at the time. It no longer
+applies, because that hard-coded zone was itself the defect: a published tool has no
+business assuming one particular part of the world, and it should not drag in a
+dependency to do so.
+
+What replaced it: the zone is resolved from `QUOTA_FALLBACK_TZ`, matching the
+convention the shell side already uses. Empty means this machine's own offset, which
+needs no database. A named zone with no `tzdata` present now fails **immediately and by
+name**:
+
+```
+account-switch: QUOTA_FALLBACK_TZ='Asia/Shanghai' could not be resolved: 'No time zone found with key Asia/Shanghai'
+account-switch: install the tzdata package, or leave QUOTA_FALLBACK_TZ empty to use this machine's local zone.
+```
+
+🔴 Why it fails instead of falling back: the shell equivalent, `TZ=<name> date`, does
+**not** fail on a host without `tzdata` — it silently renders UTC. You get a plausible
+timestamp that is simply wrong by your whole offset. This repo already documents that
+trap for the shell side, and the switching half must not reintroduce it: these
+timestamps name **backup directories**, and a timestamp that is quietly eight hours off
+is how somebody rolls back the wrong one. ⭐ Failing is recoverable. Being quietly wrong
+is not.
+
+⚠️ Verified, not assumed — and the first attempt at verifying it was invalid. Setting
+`PYTHONTZPATH` to a nonexistent directory looked like it removed the zone database, but
+the PyPI `tzdata` package was installed as a fallback and the lookup succeeded anyway,
+so the "test" would have passed no matter what the code did. The check only became
+worth anything once the simulation itself was checked: `ZoneInfo('Asia/Shanghai')` must
+raise `ZoneInfoNotFoundError` *before* the test of our behaviour means anything.
+⚠️ 这条是验过的，但**第一次验法是无效的**：把 `PYTHONTZPATH` 指向不存在的目录看着像
+拿掉了时区库，实际上 PyPI 的 `tzdata` 包还在当兜底、查找照样成功——那个「测试」无论代码
+怎么写都会通过。**先确认模拟真的移除了那个能力**，对我方行为的检验才开始有意义。
 
 ## Time zones — read this before filing a bug about wrong times / 时区
 

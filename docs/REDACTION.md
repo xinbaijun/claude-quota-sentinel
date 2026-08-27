@@ -200,6 +200,56 @@ answer down** rather than leaving the scanner's silence to speak for it.
 以及一条把某个名字举例出来、等于披露它在内部命令名单上的注释），两处均已修。
 **正则永远抓不到它们。**
 
+### Accepted residue — the internal system's name / 已接受的残留：那套内部系统的名字
+
+⚠️ **Status: present, accepted, not removed.** Recorded here because the alternative —
+silence — is what makes residue dangerous. Found 2026-08-27 (m3) by the manual pass, not
+by the scanner.
+
+The name of the private orchestration system this code was extracted from appears in
+**7 tracked files (~35 occurrences)** and in **7 commit-message lines**. It survives for
+the reason this whole subsection exists: the word is an ordinary English noun, so no
+regex can separate "the internal system" from the everyday sense, and the content-layer
+pattern table structurally cannot hold it.
+
+It is in the provenance prose on purpose — sentences of the form *"everything specific to
+that system lived in this file"* are what make the rewrite decisions legible. That is a
+real editorial value, and it is also exactly why it was never noticed: it reads as
+explanation, not as an identifier.
+
+**Why it is accepted rather than deleted, and the reasoning is not "we could not be
+bothered":**
+
+* Removing it from the tip **manufactures a history-layer residue** — that is a measured
+  property of this repository, not a guess: an earlier removal in this very file did
+  exactly that, and the fix generated the next finding. Deleting from HEAD without
+  rewriting history moves the string from one range the scanner covers into another.
+* History rewriting is **closed** here. It was cheap once, under conditions that were
+  written down at the time and no longer all hold; the standing rule since is that the
+  next member of this class is accepted and documented instead. This is the next member.
+* Weighed as a leak, it is not one of the things DoD-4 protects: no account address, no
+  credential, no internal filesystem path. It names a system a public reader cannot
+  reach and gains nothing from knowing.
+
+⇒ **Standing instruction for later milestones:** do not "tidy this up" in passing. If it
+is ever removed, it must be removed from the working tree **and** the history in the same
+operation, with the owner's authorisation, or it will simply reappear one range over.
+
+⚠️ **状态：存在、已接受、未移除。** 记在这里，因为残留真正危险的形态是「没人写下来」。
+2026-08-27（m3）由人工复核发现，不是扫描器发现的。
+
+被抽取代码所属的那套私有编排系统的名字，出现在 **7 个 tracked 文件（约 35 处）**与
+**7 行 commit message** 里。它能活下来的原因正是本小节存在的理由：那个词是普通英文名词，
+正则分不开「那套系统」与日常词义，内容层模式表结构上装不下它。
+它出现在 provenance 散文里是**有意的**——「所有那套系统专有的东西都在这个文件里」这类句子
+才让重写决定可读。这是真实的编辑价值，也正是它一直没被注意到的原因：**它读起来像解释，
+不像标识符。**
+⇒ 不删而是接受的理由：① 从 tip 删掉会**自己生成历史层残留**（本仓实测过，不是猜测）；
+② 历史重写在本仓已结清，当时便宜的那些前提不再全部成立，同类按「接受 + 明写」处理；
+③ 按泄漏权衡它不属于 DoD-4 要防的东西：不是账号邮箱、不是凭据、不是内网路径。
+⇒ **给后续里程碑的长期规则：不要顺手清理它。**真要清，必须工作树与历史在同一次操作里一起清，
+并取得仓主授权，否则它只会换一个范围重新出现。
+
 ### Settled residue — internal command names in git history / 已结清：git 历史里的内部命令名
 
 ✅ **SETTLED 2026-08-27 by a history rewrite** (`git filter-branch` + force-push),

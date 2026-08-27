@@ -157,6 +157,24 @@ c13(){ [ -n "${CLEANROOM_HOST_PID:-}" ] || { echo "CLEANROOM_HOST_PID not provid
 c14(){ local hit; hit=$(env | grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' | sort -u || true)
        [ -z "$hit" ] || { echo "email addresses present in the environment: $(echo "$hit" | wc -l) (masked): $(echo "$hit" | sed -E 's/^(.).*@(.).*$/\1***@\2***/' | tr '\n' ' ')"; exit 1; }; }
 
+# C15 asks the opposite question from C1-C14. Those all ask "is anything from the
+# private environment reachable?" -- they can all be green on a box that is clean AND
+# cannot run this tool at all. DoD-1 is about a clean machine that WORKS, so the
+# declared dependency of the switching half is asserted present, by version.
+# ⭐ Everything else here is a leak check; a set made only of leak checks is silent on
+#    the one thing the clean-machine claim is actually about.
+# C15 问的方向与 C1–C14 相反:那些都在问「私有环境有没有漏进来」,而它们**可以在一台
+# 干净但根本跑不动本工具的机器上全绿**。DoD-1 要的是「干净且能跑」,所以这里正面断言
+# 切号那一半的已声明依赖存在、且版本够。
+c15(){ command -v python3 >/dev/null 2>&1 || { echo "python3 not on PATH; the switching half cannot run here"; exit 1; }
+       python3 - <<'PY' || exit 1
+import sys
+if sys.version_info < (3, 9):
+    print(f"python3 is {sys.version.split()[0]}; account-switch needs >= 3.9 (zoneinfo)")
+    raise SystemExit(1)
+PY
+       exit 0; }
+
 ck C1  "no environment variables from that environment"  "0 of them"                          c1
 ck C2  "no forwarding shim reachable on PATH"            "no name resolves into that root"    c2
 ck C3  "that environment's repo root does not exist"     "its marker file is absent"          c3
@@ -171,5 +189,6 @@ ck C11 "cwd is neither in that repo nor beside it"       "neither"              
 ck C12 "undeclared dependencies are unreachable"         "node/npm/claude/codex/tmux all absent" c12
 ck C13 "cannot signal host processes"                    "pid attested alive AND kill -0 fails" c13
 ck C14 "no email address anywhere in the environment"    "0 (a direct guard for the no-real-accounts rule)" c14
+ck C15 "the switching half's declared dependency is present" "python3 >= 3.9 on PATH"           c15
 echo "----"; echo "cleanroom-assert: PASS=$pass FAIL=$fail"
 [ "$fail" -eq 0 ]
