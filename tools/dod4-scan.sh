@@ -101,6 +101,7 @@ ALLOW_PAT="$(load_patterns dod4-allow)"     # may legitimately be empty / 允许
 CONTENT_PAT="$(load_patterns dod4-patterns)"
 PATH_PAT="$(load_patterns dod4-paths)"
 IDENT_PAT="$(load_patterns dod4-identity)"
+PATH_ALLOW_PAT="$(load_patterns dod4-paths-allow)"   # range E only; may be empty
 [ -n "$CONTENT_PAT" ] && [ -n "$PATH_PAT" ] && [ -n "$IDENT_PAT" ] || {
   echo "dod4-scan: pattern files missing or empty under $SELF_DIR" >&2; exit 9; }
 
@@ -122,7 +123,7 @@ IDENT_PAT="$(load_patterns dod4-identity)"
 #    残余风险(写出来而不是藏起来):放在那些文件里的真凭据不会被扫到;它也提交不上去。
 is_pattern_file() {
   case "$1" in */tools/*.local.txt|./tools/*.local.txt|tools/*.local.txt) return 0 ;; esac
-  case "$(basename "$1")" in dod4-patterns.*|dod4-paths.*|dod4-identity.*|dod4-allow.*) return 0 ;; *) return 1 ;; esac
+  case "$(basename "$1")" in dod4-patterns.*|dod4-paths.*|dod4-paths-allow.*|dod4-identity.*|dod4-allow.*) return 0 ;; *) return 1 ;; esac
 }
 
 hits="$(mktemp)"; trap 'rm -f "$hits"' EXIT
@@ -150,8 +151,14 @@ git log --all --format='%an <%ae>|%cn <%ce>' 2>/dev/null | tr '|' '\n' | sort -u
   | grep -aE "$IDENT_PAT" | sed 's|^|[D-identity] |' >> "$hits"
 
 # --- E: tree entry names
+#     The path-allow list is applied HERE and only here. It excuses a NAME, never any
+#     content: a file listed there is still scanned by ranges A and B like any other.
+#     See tools/dod4-paths-allow.example.txt for why a rename cannot be used instead.
+#     路径豁免只在这里生效,且只赦免**名字**:列进去的文件在范围 A/B 里照扫不误。
 git rev-list --objects --all 2>/dev/null | awk 'NF>1{print $2}' | sort -u \
-  | grep -aE "$PATH_PAT" | sed 's|^|[E-path] |' >> "$hits"
+  | grep -aE "$PATH_PAT" \
+  | { if [ -n "$PATH_ALLOW_PAT" ]; then grep -avE "$PATH_ALLOW_PAT"; else cat; fi; } \
+  | sed 's|^|[E-path] |' >> "$hits"
 
 # --- Allowance pass. NOT a line-level ignore: each hit line has the allowed
 #     substrings deleted and is then re-tested against CONTENT_PAT, so a line that also
@@ -181,6 +188,7 @@ echo "ranges:  A worktree | B blobs(incl. deleted) | C messages | D identity | E
 echo "sources: $(list_sources)"
 echo "allowed: $( [ -n "$ALLOW_PAT" ] && echo "$(list_allow) (deleted from a line, then the line is re-tested)" || echo "(none)" )"
 echo "skipped: dod4-{patterns,paths,identity,allow}.* and tools/*.local.txt (they hold the patterns themselves; all gitignored)"
+echo "path-allow: $( [ -n "$PATH_ALLOW_PAT" ] && echo "dod4-paths-allow.* (range E names only; contents still scanned)" || echo "(none)" )"
 echo "---"
 cat "$hits"
 n=$(wc -l < "$hits" | tr -d ' ')

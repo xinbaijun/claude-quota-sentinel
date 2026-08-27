@@ -1,0 +1,39 @@
+# Range E (tree entry names) — paths that are allowed to match a path pattern.
+# 范围 E（树条目名）——允许命中路径模式的那些路径。
+#
+# One ERE per line, matched against the full path. Blank lines and # comments ignored.
+#
+# 🔴 Why this file has to exist, and why it is NOT a general allowlist.
+#
+#    Range E hunts path NAMES. The published pattern `[^/]*credential[^/]*` is meant to
+#    catch a credential file being committed — and it should stay that broad, because
+#    `my-creds.bak` and `.credentials.json.old` are exactly the shapes that get
+#    committed by accident.
+#    But a repository whose subject IS credential handling will legitimately contain
+#    tools NAMED after them. `tools/credential-argv-control.sh` is a test that proves
+#    credentials never reach a command line; it is not a credential.
+#    ⭐ And the name cannot simply be changed to dodge the pattern: range E scans every
+#    tree entry in HISTORY, so a rename leaves the old path matching forever. Renaming
+#    hides the hit from the working tree and leaves the scan permanently red — the one
+#    outcome that must be avoided, because a check that is always red teaches people to
+#    click past red.
+#
+#    ⚠️ This list applies to range E ONLY, never to content (A/B/C). If one of these
+#    files contains a real secret, the content ranges still catch it — a path exception
+#    excuses the NAME, never the contents. That distinction is the whole safety argument
+#    for having this file at all.
+#    ⚠️ Range D (commit identity) is still never filtered. An author identity has no
+#    legitimate reason to need an exception.
+#
+# 🔴 为什么必须有这个文件,以及它为什么**不是**通用白名单。
+#    范围 E 搜的是**路径名**。已发布的 `[^/]*credential[^/]*` 是用来抓「凭据文件被提交」的,
+#    而且**应该保持这么宽**——`my-creds.bak`、`.credentials.json.old` 正是最常被误提交的形态。
+#    但一个主题就是凭据处理的仓,合法地会有以它们命名的工具。
+#    ⭐ 而且改名躲不掉:范围 E 扫的是**历史里每一个树条目**,改名之后旧路径永远还在命中。
+#    改名只是把命中从工作树里藏起来,却让扫描**恒红**——那正是最该避免的结果。
+#    ⚠️ 本表**只作用于范围 E**,绝不作用于内容层 A/B/C:路径豁免只赦免**名字**,
+#    从不赦免**内容**。这条区分就是本文件全部的安全性论证。
+#    ⚠️ 范围 D（commit 身份）仍然一律不过滤——作者身份没有任何需要豁免的正当理由。
+
+(^|/)tools/credential-argv-control\.sh$
+(^|/)tools/dod4-paths-allow\.(example|local)\.txt$
