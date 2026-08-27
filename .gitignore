@@ -29,6 +29,7 @@ id_ed25519*
 id_*_deploy
 .claude.json
 
-# Site-local scan patterns: they contain the very strings being hunted, so they must
-# never be published. / 站点本地扫描模式:内容就是被搜的那些字符串,绝不可入库。
-tools/dod4-*.local.txt
+# Site-local scan patterns and the real-name -> placeholder table: their contents ARE
+# the strings the redaction removed, so they must never be published.
+# 站点本地扫描模式与真名->占位符对照表:它们的内容就是脱敏删掉的那些串,绝不可入库。
+tools/*.local.txt

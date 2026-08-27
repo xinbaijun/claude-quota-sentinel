@@ -1,0 +1,416 @@
+#!/bin/bash
+# account-probe — read an account's quota directly from the OAuth usage endpoint.
+#                 用账号自己的 access token 只读查额度。
+#
+# Provenance: extracted from `claude-account-probe` @ baseline e2f32279. The OAuth
+# query core (`probe_oauth_gate` / `probe_oauth_record` / `probe_quota`) is copied
+# essentially verbatim, including its incident notes. What did NOT come across in
+# this milestone, and why:
+#   · `probe_sources` — account discovery, which shells out to the account-switching
+#     tool and parses its human-readable output. That tool is not in this milestone.
+#   · `probe_health` — the isolated-container liveness probe. It needs Docker and a
+#     known-empty container, and it writes credential copies to disk.
+#   ⇒ Consequence: this milestone can probe **the account you are currently logged in
+#     as** (and any home directory you name explicitly), not "every account on the
+#     machine". The snapshot it writes is therefore a one-account snapshot. Say that
+#     out loud rather than letting a nearly-empty snapshot read as "no quota".
+# 抽取来源：基线 e2f32279 的 `claude-account-probe`。OAuth 直查那三个函数基本原样复制，
+# 事故注释一并带过来。本里程碑**没有**带过来的：账号发现（依赖切号工具）与容器可用性
+# 探测（依赖 Docker，且会在磁盘上留凭据副本）。
+# ⇒ 代价：本里程碑只能查**当前登录的那个账号**（以及你显式指定的 home 目录），
+#   不是「这台机器上的所有账号」。它写出的快照因而是单账号快照。这一点必须说出来，
+#   不能让一份几乎空的快照被读成「没有额度」。
+#
+# ── Why this exists / 它解决什么 ───────────────────────────────────────
+# Whether a credential file parses says almost nothing about whether the account
+# works. Measured on the day this was written, three accounts on one machine:
+#   · one whose credential showed **expired 2 days 14 hours** → **worked** (refresh
+#     renewed it automatically)
+#   · one whose credential showed **expired 23 hours**        → **dead** (token
+#     revoked; refresh was revoked with it)
+#   · one whose credential showed **2 hours still to run**    → **dead** (the
+#     organisation had disabled subscription access)
+# ⇒ "expiry time" and "usability" are almost unrelated. Only calling the API tells you.
+# 凭据文件读不读得出来，几乎不能说明账号能不能用。实测三个反例见上。
+# ⇒「过期时间」与「可用性」几乎无关，只能真调一次接口才知道。
+#
+# It is also much fresher than the cached value in the client's config file: measured
+# the same day, one account's cache said five=82% (a value from 15:39 the previous
+# day) while the live figure was 21% — its five-hour window had reset long before.
+# 它也比客户端配置文件里的缓存准得多：实测某账号缓存写着 82%（前一天的旧值），
+# 实时是 21%（五小时窗口早重置了）。
+#
+# Usage / 用法:
+#   account-probe                  # current account, quota only (fast, no side effects)
+#   account-probe --home <dir>     # probe the account whose credentials live under <dir>
+#   account-probe --json           # machine-readable
+#   account-probe --snapshot       # write the machine-readable snapshot quota-sentinel reads
+#   account-probe --no-oauth       # disable the direct query (it is on by default)
+#
+# ⚠️ Without a live refresh, **an account whose token has already expired cannot be
+#    read**: the server answers 429 for an expired token. The wording says rate limit;
+#    the meaning is "this token is unusable". See the note in probe_quota.
+# ⚠️ 没有活体刷新时，**token 已过期的账号查不到额度**——服务端对过期 token 返回 429。
+#    措辞是限流，含义是「这个 token 不能用」。见 probe_quota 里的注释。
+
+set -uo pipefail
+
+QS_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# ⚠️ Every `source` here is checked. A sourced file that decides it cannot continue
+# can only signal that with `return 1`, and **an unchecked `source` swallows it**:
+# execution carries on with unset variables, and the loud error that was printed
+# scrolls past above a wall of plausible-looking output. Fault injection caught
+# exactly that — config.sh correctly refused to guess a UTC offset, said so, and the
+# tool then printed timestamps with no offset at all as though nothing were wrong.
+# ⚠️ 这里每一个 `source` 都必须检查返回值。被 source 的文件要表达「我没法继续」只能靠
+# `return 1`，而**不检查的 `source` 会把它吞掉**：执行继续往下走、变量没定义，那句已经
+# 打出来的响亮错误被后面一大堆看着正常的输出顶得没人看见。这是故障注入实测出来的——
+# config.sh 正确地拒绝猜测 UTC 偏移量、也说了，然后工具照样把没有偏移量的时刻印了出来。
+# shellcheck source=lib/config.sh
+source "$QS_ROOT/lib/config.sh" || exit 1
+
+# ── OAuth direct quota query: on by default, with throttling and backoff ──
+#
+# This project **rejected this path once and then reversed that decision**. Both sets
+# of evidence are recorded here; do not change it from memory.
+#
+# 【2026-08-13, rejected】The OAuth poller was defaulted off. Historical data, 28
+#   samples: 25 rate_limited, 2 ok, 1 schema_error — a 7% success rate. **Note that it
+#   had already backed off to one query per 10 minutes and was still limited**, so
+#   "the interval was too short" does not explain that failure.
+#
+# 【2026-08-21, reversed】A controlled experiment (healthy token, 180-second interval,
+#   7 rounds, the two arms using tokens from **different accounts** — rate limiting is
+#   per access token, so running both arms on one token cross-contaminates them):
+#       with User-Agent    7/7 success
+#       without User-Agent 7/7 success
+#   ⇒ ① "a 180-second interval is safe" holds; ② "the User-Agent header is what makes
+#     it work" does **not** hold — it passed without one. The community claim that a
+#     missing User-Agent lands you in an aggressive rate-limit bucket has no
+#     discriminating power here. The UA is still sent (it matches the official client
+#     and is harmless), but it is not the cause.
+#
+# ⚠️ **Those 25 failures on 08-13 are still unexplained.** Possibly that machine/IP was
+#    in a limited state, possibly a server-side policy changed in those 8 days,
+#    possibly the implementation then was different, possibly it was an anomaly — **I
+#    have no evidence for any of them.** Something you cannot explain can recur, so the
+#    throttle and the backoff stay even though the decision was reversed.
+#
+# ⚠️ A second thing that is not proven: dead tokens returned 429 consistently in
+#    testing, but "429 therefore means the token is invalid" **has not been shown** —
+#    no healthy token has been seen returning 429, so there is nothing to compare
+#    against. Therefore a 429 is reported as "query failed" plus the HTTP code; this
+#    tool does not explain the server's reasoning on the server's behalf.
+#
+# 这条路本项目**否过一次又翻案一次**，两次的证据都在这里，别再凭印象改。
+# ⚠️ 08-13 那 25 次至今没有解释，所以即使翻案也必须保留节流与退避。
+# ⚠️ 「429 一定意味着 token 失效」这个因果**没有证明**，所以看到 429 时只报事实，
+#    不替服务端解释原因。
+PROBE_OAUTH="${PROBE_OAUTH:-1}"
+PROBE_USAGE_URL="${PROBE_USAGE_URL:-https://api.anthropic.com/api/oauth/usage}"
+PROBE_USER_AGENT="${PROBE_USER_AGENT:-claude-code/2.1.226}"
+# Minimum interval between two direct queries on the same token. 180 seconds is the
+# value that was measured safe on 2026-08-21.
+# 同一 token 两次直查的最小间隔。180 秒是实测过的安全值。
+PROBE_OAUTH_MIN_INTERVAL="${PROBE_OAUTH_MIN_INTERVAL:-180}"
+# After a 429, stay quiet on that token for this long (backoff), and say so in the output.
+# 撞到 429 后，该 token 静默这么久不再直查（退避），并在输出里明确报出来。
+PROBE_OAUTH_BACKOFF="${PROBE_OAUTH_BACKOFF:-900}"
+PROBE_OAUTH_LEDGER="${PROBE_OAUTH_LEDGER:-$QS_STATE_DIR/account-probe/oauth-calls.jsonl}"
+# ⚠️ Upstream defaulted this to a machine-local proxy address. That is correct on
+#    exactly one machine, so it is **empty by default** here.
+# ⚠️ 上游这里默认写了本机代理地址——那只在一台机器上对，所以这里**默认留空**。
+PROBE_PROXY="${PROBE_PROXY:-}"
+PROBE_TIMEOUT="${PROBE_TIMEOUT:-20}"
+# ⚠️ Hammering account after account gets you 429'd. Measured: five consecutive
+#    requests, the last three all rate-limited — and the script displayed them as `-`,
+#    which looks *exactly* like "this account really has a problem". That is the
+#    recurring failure mode in this whole project: **two different things rendering
+#    identically.** They are displayed separately now, and there is a gap between
+#    requests.
+# ⚠️ 逐账号连打会被 429。实测：连续 5 个请求，后 3 个全被限流，而脚本把它们显示成 `-`，
+#    与「账号真有问题」长得一模一样——正是本项目反复踩的那类「两件不同的事长得一样」。
+PROBE_SLEEP="${PROBE_SLEEP:-4}"
+
+die() { printf '%s\n' "$*" >&2; exit 1; }
+
+# probe_oauth_gate <token-id> — should we query right now? Returns 1 when the
+# throttle or the backoff blocks it.
+# ⚠️ Accounting is **per token**, not per account: rate limiting is per access token
+#    (community reports and our own measurements agree), and the same account's copies
+#    in different directories can be different tokens.
+# ⚠️ 按 **token** 记账，不是按账号：限流是按 access token 算的，而同一账号在不同目录里的
+#    副本可能是不同的 token。
+probe_oauth_gate() {
+  local tid="$1" now last_ok last_429
+  now=$(date +%s)
+  [[ -s "$PROBE_OAUTH_LEDGER" ]] || return 0
+  last_429=$(jq -r --arg t "$tid" 'select(.token_id==$t and .http=="429") | .ts' "$PROBE_OAUTH_LEDGER" 2>/dev/null | sort -n | tail -1)
+  if [[ "$last_429" =~ ^[0-9]+$ ]] && (( now - last_429 < PROBE_OAUTH_BACKOFF )); then
+    printf 'backoff-%ss\n' "$(( PROBE_OAUTH_BACKOFF - (now - last_429) ))" >&2
+    return 1
+  fi
+  last_ok=$(jq -r --arg t "$tid" 'select(.token_id==$t) | .ts' "$PROBE_OAUTH_LEDGER" 2>/dev/null | sort -n | tail -1)
+  if [[ "$last_ok" =~ ^[0-9]+$ ]] && (( now - last_ok < PROBE_OAUTH_MIN_INTERVAL )); then
+    printf 'throttled-%ss\n' "$(( PROBE_OAUTH_MIN_INTERVAL - (now - last_ok) ))" >&2
+    return 1
+  fi
+  return 0
+}
+
+probe_oauth_record() {
+  local tid="$1" http="$2"
+  mkdir -p "$(dirname "$PROBE_OAUTH_LEDGER")" 2>/dev/null || return 0
+  printf '{"ts":%s,"token_id":"%s","http":"%s"}\n' "$(date +%s)" "$tid" "$http" \
+    >> "$PROBE_OAUTH_LEDGER" 2>/dev/null || true
+  chmod 600 "$PROBE_OAUTH_LEDGER" 2>/dev/null || true
+}
+
+# probe_quota <home-dir>
+# echoes "five<TAB>week<TAB>five_reset_iso<TAB>week_reset_iso"; on failure echoes an
+# HTTP/error code to stderr.
+probe_quota() {
+  local home="$1" token body http tid
+  token=$(jq -r '.claudeAiOauth.accessToken // empty' "$home/.claude/.credentials.json" 2>/dev/null)
+  [[ -n "$token" ]] || { printf 'no-token\n' >&2; return 1; }
+  # ⚠️ Store only the token's hash, never the token — this ledger is kept long-term.
+  # ⚠️ 只存 token 的哈希，不存 token 本身——这份账本会长期留着。
+  tid=$(printf '%s' "$token" | sha256sum | cut -c1-16)
+  probe_oauth_gate "$tid" || return 1
+  body=$(mktemp) || return 1
+  # ⚠️ The token is handed to curl through an **anonymous pipe fd**; it never enters
+  #    argv, the process table, or any log.
+  # ⚠️ token 经匿名 pipe fd 交给 curl，不进 argv/进程表/日志。
+  http=$(curl --silent --show-error --max-time "$PROBE_TIMEOUT" \
+      ${PROBE_PROXY:+--proxy "$PROBE_PROXY"} \
+      --header @<(printf 'Authorization: Bearer %s\n' "$token") \
+      --header 'anthropic-beta: oauth-2025-04-20' \
+      --header "User-Agent: $PROBE_USER_AGENT" \
+      --output "$body" --write-out '%{http_code}' \
+      "$PROBE_USAGE_URL" 2>/dev/null)
+  probe_oauth_record "$tid" "$http"
+  if [[ "$http" != "200" ]]; then
+    # ⚠️ The server also answers `429 rate_limit_error` for an **expired token** — that
+    #    error is lying: it means "this token cannot be used", not "you are going too
+    #    fast". The pattern measured on the day this was written was clean: the two
+    #    accounts that succeeded had unexpired tokens; all three that were "rate
+    #    limited" had already expired. Waiting 90 seconds and stretching the interval
+    #    to 20 seconds changed nothing — **it is not a frequency problem.**
+    #    So when you see a 429, first check whether the token has expired: expired →
+    #    it needs a refresh; not expired → only then might it be a real rate limit.
+    #    The two call for completely different responses and must not be collapsed
+    #    into one sentence.
+    # ⚠️ 服务端对**过期 token** 返回的也是 `429 rate_limit_error`——这个报错在撒谎，
+    #    实际含义是「这个 token 不能用」，不是「你打太快」。等 90 秒再打、把间隔拉到
+    #    20 秒，结果一模一样——**不是频率问题**。看到 429 先看 token 有没有过期；
+    #    两者的处置完全不同，不能合成一句话。
+    case "$http" in
+      429)
+        # ⚠️ Do not explain the server's reasoning for it. Dead tokens returned 429
+        #    consistently, but "429 therefore means the token is invalid" is unproven
+        #    (no healthy token has ever been seen returning 429, so there is nothing
+        #    to compare against). Report the fact and back off.
+        # ⚠️ 不替服务端解释原因。只报事实 + 退避。
+        printf 'http-429(backed off %ss)\n' "$PROBE_OAUTH_BACKOFF" >&2
+        ;;
+      401) printf 'unauthorized\n' >&2 ;;
+      403) printf 'forbidden\n' >&2 ;;
+      *)   printf 'http-%s\n' "$http" >&2 ;;
+    esac
+    rm -f "$body"; return 1
+  fi
+  jq -r '[(.five_hour.utilization // "?"), (.seven_day.utilization // "?"),
+          (.five_hour.resets_at // "?"), (.seven_day.resets_at // "?")] | @tsv' \
+    "$body" 2>/dev/null
+  local rc=$?
+  rm -f "$body"
+  return $rc
+}
+
+# ── Timestamp rendering / 时刻渲染 ──────────────────────────────────────
+# ⚠️ The server's `resets_at` is **UTC** (e.g. 2026-08-21T07:30:00+00:00). It used to
+#    not be displayed at all, so "when can I use it again" had to be looked up
+#    elsewhere and converted by hand — and the conversion went wrong (a UTC value read
+#    as local, eight hours out). It is now converted **and the server's original
+#    string is printed alongside**, so that when the two disagree you can tell
+#    immediately which side converted wrongly.
+# ⚠️ The conversion does not use `TZ=<zone name>`: on a host without tzdata that
+#    **silently falls back to UTC** without an error. It uses
+#    `date -u -d @(epoch + offset)` — a UTC render plus fixed arithmetic, consulting
+#    no time-zone database, identical on every machine. The offset itself is resolved
+#    once in lib/config.sh.
+# ⚠️ 服务端给的 resets_at 是 **UTC**。换算不用 `TZ=<区域名>`：缺 tzdata 的容器里它会
+#    **静默回退 UTC**、不报错。这里用 UTC 渲染 + 固定算术偏移，不查任何时区库。
+_iso_to_local() {   # ISO(UTC) → "YYYY-MM-DD HH:MM:SS +ZZZZ (in X)"
+  local iso="${1:-}" ep now d
+  [[ -n "$iso" && "$iso" != "?" && "$iso" != "-" ]] || { printf 'unknown'; return 0; }
+  ep=$(date -d "$iso" +%s 2>/dev/null) || { printf '%s (unparseable)' "$iso"; return 0; }
+  now=$(date +%s); d=$(( ep - now ))
+  local human
+  local a=${d#-}
+  if   (( a < 60 ));    then human="${a}s"
+  elif (( a < 3600 ));  then human="$(( a / 60 ))m"
+  elif (( a < 86400 )); then human="$(( a / 3600 ))h $(( (a % 3600) / 60 ))m"
+  else human="$(( a / 86400 ))d $(( (a % 86400) / 3600 ))h"
+  fi
+  (( d < 0 )) && human="${human} ago (already reset)" || human="in ${human}"
+  printf '%s %s (%s)' "$(date -u -d "@$(( ep + QUOTA_TZ_OFFSET_SEC ))" '+%Y-%m-%d %H:%M:%S')" \
+    "$QUOTA_TZ_LABEL" "$human"
+}
+
+# ── Main / 主流程 ───────────────────────────────────────────────────────
+# ⚠️ Do not run the main flow when this file is sourced. Tests and debugging need to
+#    call probe_quota on its own, and the main flow issues real API calls the moment
+#    it runs — sourcing this file once while writing tests burned five real calls and
+#    rate-limited the author. Every executable script deserves this guard.
+# ⚠️ 被 source 时不执行主流程。主流程一跑就会真打接口——写测试时 source 一次白打了 5 次，
+#    正好把自己打成 429。可执行脚本一律该有这道闸。
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0 2>/dev/null || true
+fi
+
+WANT_JSON=0; WANT_SNAPSHOT=0; WANT_OAUTH=0; HOMES=()
+[[ "$PROBE_OAUTH" == "1" ]] && WANT_OAUTH=1
+while (( $# )); do
+  case "$1" in
+    --json)     WANT_JSON=1 ;;
+    --snapshot) WANT_SNAPSHOT=1 ;;
+    --oauth)    WANT_OAUTH=1 ;;
+    --no-oauth) WANT_OAUTH=0 ;;
+    --home)     shift; [[ -n "${1:-}" ]] || die "--home needs a directory"; HOMES+=("$1") ;;
+    -h|--help)
+      sed -n '/^# Usage/,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *) die "unknown argument: $1 (try --help)" ;;
+  esac
+  shift
+done
+(( ${#HOMES[@]} )) || HOMES=("$HOME")
+
+command -v jq   >/dev/null 2>&1 || die "account-probe: jq is required"
+command -v curl >/dev/null 2>&1 || die "account-probe: curl is required"
+
+HOST_ACCOUNT=$(jq -r '.oauthAccount.emailAddress // empty' "$QUOTA_CLAUDE_JSON" 2>/dev/null)
+
+rows=""
+first=1
+for home in "${HOMES[@]}"; do
+  email=$(jq -r '.oauthAccount.emailAddress // empty' "$home/.claude.json" 2>/dev/null)
+  [[ -n "$email" ]] || email="(unknown:$home)"
+  five="-"; week="-"; freset="-"; wreset="-"; note=""
+  if (( WANT_OAUTH )); then
+    (( first )) || sleep "$PROBE_SLEEP"
+    first=0
+    if out=$(probe_quota "$home" 2>${TMPDIR:-/tmp}/.qs-probe-err.$$); then
+      five=$(printf '%s' "$out" | cut -f1); week=$(printf '%s' "$out" | cut -f2)
+      freset=$(printf '%s' "$out" | cut -f3); wreset=$(printf '%s' "$out" | cut -f4)
+      note="ok"
+    else
+      # ⚠️ Keep the reason. "Could not read" and "the account has no quota" must never
+      #    render the same way — that is the exact confusion this tool exists to end.
+      # ⚠️ 保留原因。「读不到」与「这个账号没额度」绝不能长得一样——那正是本工具要终结的
+      #    那种混淆。
+      note=$(cat "${TMPDIR:-/tmp}/.qs-probe-err.$$" 2>/dev/null | tr -d '\n'); note="${note:-failed}"
+    fi
+    rm -f "${TMPDIR:-/tmp}/.qs-probe-err.$$"
+  else
+    note="oauth-disabled"
+  fi
+  rows+="${email}\t${home}\t${five}\t${week}\t${freset}\t${wreset}\t-\t${note}\n"
+done
+
+# ── Snapshot / 快照 ─────────────────────────────────────────────────────
+# ⚠️ Write only what was **actually read this time**. If it could not be read, record
+#    the outcome honestly and **never leave the previous value in place to fill the
+#    gap** — that makes the reader treat an old number as current, which is more
+#    dangerous than having no data.
+# ⚠️ 只写「本次真的查到的」。查不到就如实标 outcome，**绝不把上一次的值留在里面充数**
+#    ——那会让读的人拿着旧数当新数用，比没有数据更危险。
+if (( WANT_SNAPSHOT )); then
+  SNAPSHOT_PATH="${PROBE_SNAPSHOT:-$QUOTA_SNAPSHOT_FILE}"
+  mkdir -p "$(dirname "$SNAPSHOT_PATH")" 2>/dev/null
+  _snap_tmp=$(mktemp "${SNAPSHOT_PATH}.XXXXXX") || die "cannot create a temporary file"
+  printf '%b' "$rows" | jq -R -s \
+      --arg cur "$HOST_ACCOUNT" \
+      --argjson now "$(date +%s)" \
+      --argjson tzoff "$QUOTA_TZ_OFFSET_SEC" \
+      --arg tzlabel "$QUOTA_TZ_LABEL" \
+      --arg retired "${QUOTA_RETIRED_ACCOUNTS:-}" \
+      --arg paused "${QUOTA_DISABLED_ACCOUNTS:-}" '
+    # ⚠️ jq'"'"'s fromdate only accepts a strict "...Z". The server sends
+    #    "2026-08-27T07:00:00.198232+00:00" — fractional seconds, and +00:00 rather
+    #    than Z. Feeding that in **silently returns null** (no error), so the whole
+    #    reset column comes out empty with no visible cause. Strip the fraction and
+    #    replace +00:00 with Z before parsing.
+    # ⚠️ jq 的 fromdate 只认严格的 "...Z"。服务端给的带小数秒、用 +00:00，直接喂进去会
+    #    **静默返回 null**（不报错），于是重置时刻整列变空却看不出原因。
+    def to_ep: if . == "-" or . == "?" or . == "" or . == null then null
+               else (try ((. | sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z")) | fromdate)
+                     catch null) end;
+    def localts: if . == null then null
+                 else ((. + $tzoff) | strftime("%Y-%m-%d %H:%M:%S") + " " + $tzlabel) end;
+    ($retired | split(" ") | map(select(length>0))) as $R
+    | ($paused  | split(" ") | map(select(length>0))) as $P
+    | { schema: 1,
+        generated_at: $now,
+        generated_at_local: (($now + $tzoff) | strftime("%Y-%m-%d %H:%M:%S") + " " + $tzlabel),
+        generated_at_utc:   ($now | strftime("%Y-%m-%dT%H:%M:%SZ")),
+        source: "oauth_api",
+        note: "Each account is queried read-only against /api/oauth/usage with its own access token; nothing is refreshed and no credential is written. *_reset fields are epoch seconds; *_reset_local is the same instant rendered at the configured offset.",
+        current_account: $cur,
+        accounts: (
+          split("\n") | map(select(length>0) | split("\t")
+          | .[0] as $em
+          | { email: $em,
+              status: (if ($R | index($em)) then "retired"
+                       elif ($P | index($em)) then "paused"
+                       else "active" end),
+              is_current: ($em == $cur),
+              five_hour: (if .[2] == "-" then null else (.[2] | tonumber? // null) end),
+              seven_day: (if .[3] == "-" then null else (.[3] | tonumber? // null) end),
+              five_reset:  (.[4] | to_ep),
+              five_reset_local:  (.[4] | to_ep | localts),
+              five_reset_raw_utc: .[4],
+              week_reset:  (.[5] | to_ep),
+              week_reset_local:  (.[5] | to_ep | localts),
+              week_reset_raw_utc: .[5],
+              outcome: (if .[2] != "-" then "ok" else (.[7] // "unknown") end) })
+        ) }' > "$_snap_tmp" 2>/dev/null
+  if [[ -s "$_snap_tmp" ]] && jq -e . "$_snap_tmp" >/dev/null 2>&1; then
+    mv -f "$_snap_tmp" "$SNAPSHOT_PATH"
+    (( WANT_JSON )) || echo "snapshot written to $SNAPSHOT_PATH"
+  else
+    rm -f "$_snap_tmp"
+    # ⚠️ Better to keep the previous snapshot (it carries its own generated_at, so a
+    #    reader can see it is old) than to overwrite it with a truncated file.
+    # ⚠️ 宁可保留上一份旧快照（它带着自己的 generated_at，读的人看得出旧），
+    #    也不要写一个残缺文件覆盖它。
+    echo "❌ snapshot generation failed; the previous one was left untouched" >&2
+    exit 1
+  fi
+  (( WANT_JSON )) || exit 0
+fi
+
+if (( WANT_JSON )); then
+  printf '%b' "$rows" | jq -R -s --arg cur "$HOST_ACCOUNT" '
+    split("\n") | map(select(length>0) | split("\t")
+    | {email:.[0], home:.[1], five_hour:.[2], seven_day:.[3],
+       five_reset:.[4], week_reset:.[5], health:.[6], quota_note:.[7],
+       is_current:(.[0]==$cur)})'
+  exit 0
+fi
+
+printf '%b' "$rows" | while IFS=$'\t' read -r email home five week freset wreset _health note; do
+  [[ -n "$email" ]] || continue
+  printf '%s%s\n' "$email" "$( [[ "$email" == "$HOST_ACCOUNT" ]] && printf '  (current)' )"
+  printf '  home:      %s\n' "$home"
+  if [[ "$five" == "-" ]]; then
+    # Two different things, two different lines. Never one dash for both.
+    # 两件不同的事，两种不同的行。绝不用同一个横杠糊过去。
+    printf '  quota:     not read (%s)\n' "$note"
+  else
+    printf '  five-hour: %s%%   resets %s\n' "$five" "$(_iso_to_local "$freset")"
+    printf '  weekly:    %s%%   resets %s\n' "$week" "$(_iso_to_local "$wreset")"
+    printf '  server original (UTC): %s | %s\n' "$freset" "$wreset"
+  fi
+done

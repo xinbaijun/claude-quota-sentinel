@@ -3,10 +3,10 @@
 > 🚧 **Skeleton / 骨架阶段** — sections marked *(placeholder / 占位)* are not written
 > yet and will be filled in a later milestone. **Sections without that marker are
 > already in force and are not drafts to be overwritten** — this applies in particular
-> to **Provenance**, whose extraction rule is normative and has no expiry.
+> to **Provenance** and **Requirements**, and to every document under `docs/`.
 > 标了 *(placeholder / 占位)* 的小节尚未成文，留待后续里程碑补齐。**未标占位的小节
-> 已经生效，不是待覆盖的草稿**——尤其是 **Provenance**，其中的抽取规则是规范性的、
-> 长期有效。
+> 已经生效，不是待覆盖的草稿**——尤其是 **Provenance** 与 **Requirements**，
+> 以及 `docs/` 下的每一份文档。
 
 Watch Claude account quota, switch accounts when a threshold is hit, and keep an audit
 trail of every switch.
@@ -28,8 +28,15 @@ broke once; the incident notes travel with the code.
 
 ## Requirements / 运行前提
 
-*(placeholder / 占位)* — Linux only for now; macOS and Windows are **unverified**.
-暂时只保证 Linux；macOS 与 Windows 标为**未验证**。
+The full list, with what is **not** required and why, is in
+[docs/REQUIREMENTS.md](docs/REQUIREMENTS.md). Short version: `bash` >= 4.1, `jq`, plus
+`tmux` and a logged-in `claude` for the panel reader and `curl` for the OAuth reader.
+Linux only; macOS and Windows are **unverified**, and that document names the specific
+GNU-only flags that would break there rather than leaving it vague.
+完整清单（含**不需要**什么、为什么）见 [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)。
+短版：`bash` >= 4.1、`jq`，面板读数那条链另需 `tmux` 与已登录的 `claude`，
+OAuth 直查另需 `curl`。只保证 Linux；macOS 与 Windows**未验证**，
+该文档写明了具体会在哪些 GNU 专有 flag 上坏，而不是含糊带过。
 
 ## Install / 安装
 

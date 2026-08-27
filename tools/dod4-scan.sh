@@ -51,6 +51,14 @@ load_patterns() {                       # $1 = base name -> joined ERE on stdout
 # while still scanning correctly -- a scan whose declared scope is silently blank.
 # 模式来源在当前 shell 里算,不放进 load_patterns:后者在命令替换(子 shell)里跑,
 # 赋值会被丢弃。本脚本第一版正是如此:扫描本身没错,但声明出来的范围是空的。
+list_allow() {
+  local f out=""
+  for f in "$SELF_DIR/dod4-allow.example.txt" "$SELF_DIR/dod4-allow.local.txt"; do
+    [ -f "$f" ] && out="$out $(basename "$f")"
+  done
+  printf '%s' "${out# }"
+}
+
 list_sources() {
   local base f out=""
   for base in dod4-patterns dod4-paths dod4-identity; do
@@ -61,6 +69,7 @@ list_sources() {
   printf '%s' "${out# }"
 }
 
+ALLOW_PAT="$(load_patterns dod4-allow)"     # may legitimately be empty / 允许为空
 CONTENT_PAT="$(load_patterns dod4-patterns)"
 PATH_PAT="$(load_patterns dod4-paths)"
 IDENT_PAT="$(load_patterns dod4-identity)"
@@ -72,7 +81,21 @@ IDENT_PAT="$(load_patterns dod4-identity)"
 # that quietly skips files reads exactly like a scan that found nothing.
 # 模式文件按定义就装满了被搜的字符串,故排除在内容范围之外。这里明写而不是静默跳过:
 # 静默跳过的扫描和「扫了没发现」长得一模一样。
-is_pattern_file() { case "$(basename "$1")" in dod4-patterns.*|dod4-paths.*|dod4-identity.*) return 0 ;; *) return 1 ;; esac; }
+# ⚠️ `*.local.txt` under tools/ is skipped too. Those files are the site-local pattern
+#    lists and the real-name -> placeholder table: their contents ARE the strings being
+#    hunted, so scanning them makes the scanner match itself and go **permanently red**
+#    — and a check that is always red teaches people to click past red. They are
+#    gitignored by construction (see .gitignore), so they cannot reach ranges B-E.
+#    Residual risk, stated rather than hidden: a real secret parked in one of those
+#    files is not scanned. It also cannot be committed.
+# ⚠️ tools/ 下的 `*.local.txt` 也跳过。那是站点本地模式表与真名->占位符对照表,内容**就是**
+#    被搜的那些串,扫它们会让扫描器匹配到自己而**恒红**——而一条永远红的检查会训练出
+#    「看到红也照过」。它们按构造已被 gitignore,进不了范围 B-E。
+#    残余风险(写出来而不是藏起来):放在那些文件里的真凭据不会被扫到;它也提交不上去。
+is_pattern_file() {
+  case "$1" in */tools/*.local.txt|./tools/*.local.txt|tools/*.local.txt) return 0 ;; esac
+  case "$(basename "$1")" in dod4-patterns.*|dod4-paths.*|dod4-identity.*|dod4-allow.*) return 0 ;; *) return 1 ;; esac
+}
 
 hits="$(mktemp)"; trap 'rm -f "$hits"' EXIT
 
@@ -102,10 +125,34 @@ git log --all --format='%an <%ae>|%cn <%ce>' 2>/dev/null | tr '|' '\n' | sort -u
 git rev-list --objects --all 2>/dev/null | awk 'NF>1{print $2}' | sort -u \
   | grep -aE "$PATH_PAT" | sed 's|^|[E-path] |' >> "$hits"
 
+# --- Allowance pass. NOT a line-level ignore: each hit line has the allowed
+#     substrings deleted and is then re-tested against CONTENT_PAT, so a line that also
+#     carries a real secret still survives. A line-level ignore is how an allowlist
+#     turns into a silent hole, and this file exists to not have one.
+#     ⚠️ Ranges D and E are deliberately NOT filtered. D is author identity and E is
+#     path names; neither can contain a documentation placeholder for a good reason,
+#     and narrowing the filter is free here.
+# --- 白名单过滤。**不是**逐行忽略:每条命中行先删掉白名单子串,再拿 CONTENT_PAT 重测,
+#     所以同一行里若还有真凭据,它照样留下来。逐行忽略正是白名单变成静默漏洞的方式。
+#     ⚠️ 范围 D/E 刻意不过滤:一个是作者身份、一个是路径名,都不该出现文档占位符。
+if [ -n "$ALLOW_PAT" ]; then
+  kept="$(mktemp)"
+  while IFS= read -r line; do
+    case "$line" in
+      '[D-identity]'*|'[E-path]'*) printf '%s\n' "$line" >> "$kept"; continue ;;
+    esac
+    if printf '%s' "$line" | sed -E "s/$ALLOW_PAT//g" | grep -qaE "$CONTENT_PAT"; then
+      printf '%s\n' "$line" >> "$kept"
+    fi
+  done < "$hits"
+  mv -f "$kept" "$hits"
+fi
+
 echo "repo:    $REPO"
 echo "ranges:  A worktree | B blobs(incl. deleted) | C messages | D identity | E paths"
 echo "sources: $(list_sources)"
-echo "skipped: files named dod4-{patterns,paths,identity}.* (they hold the patterns themselves)"
+echo "allowed: $( [ -n "$ALLOW_PAT" ] && echo "$(list_allow) (deleted from a line, then the line is re-tested)" || echo "(none)" )"
+echo "skipped: dod4-{patterns,paths,identity,allow}.* and tools/*.local.txt (they hold the patterns themselves; all gitignored)"
 echo "---"
 cat "$hits"
 n=$(wc -l < "$hits" | tr -d ' ')

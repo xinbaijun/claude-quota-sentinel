@@ -1,0 +1,41 @@
+# Allowed substrings (ERE, one per line, blank + '#' ignored).
+# 白名单子串(ERE,每行一条,空行与 '#' 忽略)。
+#
+# HOW IT IS APPLIED — this is not a "skip these lines" list.
+# Each candidate hit line has every allowed substring **deleted**, and is then re-tested
+# against the full content pattern. The hit survives unless nothing matches any more.
+# So a line carrying both a real secret and an allowed placeholder is still reported.
+# A plain line-level ignore would have dropped that line whole, which is how allowlists
+# usually turn into silent holes.
+# 怎么生效 —— 这不是一份「跳过这些行」的清单。
+# 每一条候选命中行会先把白名单子串**删掉**,再拿完整内容模式重测一次;只有删完之后
+# 什么都不匹配了,这条命中才消失。因此一行里既有真凭据又有占位符时,它仍然会被报出来。
+# 逐行忽略式的白名单就是在这里变成静默漏洞的。
+#
+# WHAT MAY GO IN HERE
+# Only strings that **cannot** be a real secret by definition — not strings that merely
+# happen to be safe today. The entries below are the RFC 2606 / RFC 6761 reserved
+# documentation domains: they are reserved precisely so that they can never resolve to
+# a real host, so no real account can exist at one.
+# 什么能进来
+# 只有**按定义就不可能**是真凭据的串,不是「今天恰好没事」的串。下面这些是 RFC 2606 /
+# RFC 6761 保留的文档专用域名:保留它们的全部目的就是让它们永远解析不到真实主机,
+# 因此不可能有真实账号在上面。
+#
+# WHAT MUST NOT
+# Your own domain, your staging domain, a vendor's domain, an internal hostname, or a
+# specific address you have decided is fine. Any of those makes the scan structurally
+# unable to see that string ever again, in any range, including range B where a real
+# leak would otherwise be found years later.
+# 什么绝不能进来
+# 你自己的域名、预发域名、供应商域名、内部主机名,或某个你判断「没问题」的具体地址。
+# 放进来等于让扫描在所有范围内永久看不见那个串——包括范围 B,而真正的泄漏往往正是
+# 多年以后在那里被发现的。
+#
+# Site-specific allowances, if you ever genuinely need one, go in dod4-allow.local.txt
+# (gitignored) — never here, because this file is published.
+# 站点专有的豁免(如果真的需要)写进 dod4-allow.local.txt(已 gitignore),不要写在这里,
+# 因为本文件会被公开。
+
+[A-Za-z0-9._%+-]+@example\.(com|org|net)
+[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]*\.(example|invalid|test|localhost)

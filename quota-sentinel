@@ -1,0 +1,384 @@
+#!/bin/bash
+# quota-sentinel — read Claude account quota, keep a ledger, and (from a later
+#                  milestone) switch accounts when a threshold is hit.
+#                  读 Claude 账号额度、落账，并在后续里程碑到阈值切号。
+#
+# Provenance: extracted from a private in-house fleet-automation codebase at commit
+# `e2f32279`. See docs/PROVENANCE.md for the per-function mapping and README.md for
+# the extraction rules. This milestone ships the **reading** half only; the switching
+# half is not here yet, and the CLI says so rather than pretending.
+# 抽取来源：内部私有编队自动化代码库的 `e2f32279`。逐函数映射见 docs/PROVENANCE.md，
+# 抽取规则见 README.md。本里程碑只有**读数**那一半；切号那一半还不在，CLI 会如实说明，
+# 不假装。
+#
+# ── Why this exists, in one paragraph ──────────────────────────────────
+# The authoritative quota reading does not come from a public API. It comes from
+# driving one dedicated Claude Code session that only ever types `/usage`: that makes
+# the client fetch **live** numbers from the server and write them into its own
+# config file, which this script then reads. Two things measured on the day this
+# approach replaced screen-scraping:
+#   ① it is live — `/usage` read five_hour=26% while the cached value in the file
+#      still said 100% (its fetch timestamp was 15 hours behind)
+#   ② it costs no quota — the panel self-reports Total cost $0.0000 / 0 input,
+#      0 output; it is a REST query, not inference
+# The older approach anchored regexes to the client's rendered wording, and went
+# silently dead the moment that wording changed (measured: the menu branch was
+# entered zero times in 28 consecutive days while the banner branch ran 165+ times).
+# Screen detection is kept, but demoted to a fallback that is only consulted when
+# `/usage` cannot be read, and weak evidence must cross-check against `/usage`.
+# 权威读数没有公开接口。它来自驱动一个只发 `/usage` 的专用 cc 会话：那会让客户端从服务端
+# 拉**实时**额度并写进自己的配置文件，本脚本只读那份 JSON。换掉截屏方案当天的实测：
+# ①实时——/usage 读到 26%，同一时刻文件里的陈旧缓存还写着 100%（落后 15 小时）；
+# ②零额度成本——面板自报 Total cost $0.0000。旧做法把正则跟渲染文案绑死，文案一改就无声
+# 失效（实测：选单分支连续 28 天零进入，同期横幅分支跑了 165+ 次）。截屏判据保留，
+# 但降级为兜底，且弱证据必须与 /usage 交叉验证。
+#
+# ⚠️ The cache-freshness gate is a hard requirement: the config file is written by
+#    every concurrent Claude Code session, and any of them may write back its own
+#    stale in-memory copy. So before any decision, verify the fetch timestamp is
+#    recent enough; if it is not, treat the reading as unknown and do nothing, and let
+#    the next `/usage` heal it.
+# ⚠️ 缓存新鲜度闸是硬要求：配置文件被全部并发 cc 会话共写，各自可能拿自己内存里的陈旧
+#    副本回写。因此任何决策前都必须校验取数时刻足够新，不新就当「未知」不动作。
+
+set -uo pipefail
+
+QS_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# ⚠️ Every `source` here is checked. A sourced file that decides it cannot continue
+# can only signal that with `return 1`, and **an unchecked `source` swallows it**:
+# execution carries on with unset variables, and the loud error that was printed
+# scrolls past above a wall of plausible-looking output. Fault injection caught
+# exactly that — config.sh correctly refused to guess a UTC offset, said so, and the
+# tool then printed timestamps with no offset at all as though nothing were wrong.
+# ⚠️ 这里每一个 `source` 都必须检查返回值。被 source 的文件要表达「我没法继续」只能靠
+# `return 1`，而**不检查的 `source` 会把它吞掉**：执行继续往下走、变量没定义，那句已经
+# 打出来的响亮错误被后面一大堆看着正常的输出顶得没人看见。这是故障注入实测出来的——
+# config.sh 正确地拒绝猜测 UTC 偏移量、也说了，然后工具照样把没有偏移量的时刻印了出来。
+# shellcheck source=lib/config.sh
+source "$QS_ROOT/lib/config.sh" || exit 1
+# shellcheck source=lib/reading.sh
+source "$QS_ROOT/lib/reading.sh" || exit 1
+# shellcheck source=lib/monitor.sh
+source "$QS_ROOT/lib/monitor.sh" || exit 1
+# shellcheck source=lib/detect.sh
+source "$QS_ROOT/lib/detect.sh" || exit 1
+# shellcheck source=lib/state.sh
+source "$QS_ROOT/lib/state.sh" || exit 1
+
+# ── Dependency check / 依赖自检 ─────────────────────────────────────────
+# ⚠️ Check up front and fail **loudly**. A missing `jq` otherwise surfaces as a
+#    reading that is quietly always empty, which is indistinguishable from "the
+#    account has no quota data" — and that is the single most expensive way for this
+#    tool to be wrong.
+# ⚠️ 开头就查，且**响亮失败**。少了 `jq` 的表现是读数恒空，而「读数恒空」与「这个账号
+#    没有额度数据」长得一模一样——那是本工具最贵的一种错法。
+quota_require_deps() {
+  local missing=() optional_missing=()
+  local c
+  for c in jq date awk grep sed; do
+    command -v "$c" >/dev/null 2>&1 || missing+=("$c")
+  done
+  for c in tmux curl flock; do
+    command -v "$c" >/dev/null 2>&1 || optional_missing+=("$c")
+  done
+  if (( ${#missing[@]} )); then
+    printf 'quota-sentinel: missing required command(s): %s\n' "${missing[*]}" >&2
+    printf '  install them and try again; see README.md "Requirements".\n' >&2
+    return 1
+  fi
+  if (( ${#optional_missing[@]} )); then
+    printf 'quota-sentinel: missing command(s) needed by parts of this tool: %s\n' \
+      "${optional_missing[*]}" >&2
+    printf '  tmux -> the /usage panel reader; curl -> the OAuth reader; flock -> concurrency locks.\n' >&2
+    printf '  Commands that do not need them still work. See README.md "Requirements".\n' >&2
+  fi
+  return 0
+}
+
+# ── status ──────────────────────────────────────────────────────────────
+quota_cmd_status() {
+  local now; now=$(date +%s)
+  local snap
+  echo "-- quota status ($(quota_fmt_ts "$now")) --"
+  if snap=$(quota_snapshot); then
+    local ft; ft=$(printf '%s' "$snap" | cut -f1)
+    local s_five s_week s_freset s_wreset fe we
+    s_five=$(printf '%s' "$snap" | cut -f4); s_freset=$(printf '%s' "$snap" | cut -f5)
+    s_week=$(printf '%s' "$snap" | cut -f6); s_wreset=$(printf '%s' "$snap" | cut -f7)
+    printf 'account: %s\n' "$(printf '%s' "$snap" | cut -f3)"
+    printf 'read at: %s (%s, %ss)%s\n' "$(quota_fmt_ts "$ft")" "$(quota_fmt_delta "-$(( now - ft ))")" "$(( now - ft ))" \
+      "$( (( now - ft > QUOTA_FETCH_MAX_AGE )) && echo "  ⚠️ past the ${QUOTA_FETCH_MAX_AGE}s usable window; not fit to decide on" )"
+    # Reset times: the server sends UTC ISO (…+00:00). They are shown converted to
+    # the local offset **with the server's original string attached**, so that when
+    # the two disagree it is possible to tell which side converted wrongly.
+    # 重置时刻：服务端原文是 UTC 的 ISO，这里换算成本地偏移显示，并把原文一并附上，
+    # 免得对不上时无从查证「到底是谁换算错了」。
+    fe=$(quota_iso_to_epoch "$s_freset" || true)
+    we=$(quota_iso_to_epoch "$s_wreset" || true)
+    printf 'five-hour window: %3s%%   resets %s (%s)\n' "$s_five" "$(quota_fmt_ts "$fe")" \
+      "$( [[ "$fe" =~ ^[0-9]+$ ]] && quota_fmt_delta "$(( fe - now ))" || echo 'time unknown' )"
+    printf 'weekly window:  %5s%%   resets %s (%s)\n' "$s_week" "$(quota_fmt_ts "$we")" \
+      "$( [[ "$we" =~ ^[0-9]+$ ]] && quota_fmt_delta "$(( we - now ))" || echo 'time unknown' )"
+    printf '  ^ server original (UTC): five-hour %s | weekly %s\n' "${s_freset:-none}" "${s_wreset:-none}"
+  else
+    echo "⚠️ cannot read cachedUsageUtilization"
+  fi
+
+  # ── The estimate line, kept alongside the real one ──────────────────
+  # The real value is "what was last measured"; the estimate is "that value
+  # extrapolated to now at the measured burn rate". The switch criteria look at both,
+  # so a human should see both — otherwise you get the baffling situation where
+  # status shows 66% and the tool switches anyway.
+  # 真实值是「上次量到的」，预估值是「按实测烧速外推到此刻的」。切号判据两者都看，
+  # 所以人也应该两者都看得到——否则会出现「状态显示 66%，脚本却切号了」这种看不懂的场面。
+  local est rate_f rate_w base_ts lead
+  echo "-- estimate (the switch criteria read the real value and the estimate; either crossing the line triggers) --"
+  if est=$(quota_estimate_values "$now"); then
+    rate_f=$(quota_state_get '.burn_rate_five' 0)
+    rate_w=$(quota_state_get '.burn_rate_week' 0)
+    base_ts=$(quota_state_get '.fetched_ts' 0)
+    lead=$(( now - base_ts ))
+    printf 'estimated five-hour: %s%%   estimated weekly: %s%%   (extrapolated %ss)\n' \
+      "${est%% *}" "${est##* }" "$lead"
+    printf 'measured burn: five-hour %s%%/min   weekly %s%%/min\n' \
+      "$(awk -v r="$rate_f" 'BEGIN{printf "%.2f", r*60}')" \
+      "$(awk -v r="$rate_w" 'BEGIN{printf "%.2f", r*60}')"
+    printf 'switch lines: five-hour %s%%   weekly %s%%\n' "$QUOTA_SWITCH_PCT_FIVE" "$QUOTA_SWITCH_PCT_WEEK"
+    if quota_estimate_exceeds "$now"; then
+      echo "⚠️ the estimate has crossed the line -> one /usage check is forced first; only repeated failures to read fall back to the estimate"
+    fi
+  else
+    # Say why there is none — "not shown" and "estimated at zero" are different things.
+    # 说清楚为什么没有——「没显示」和「预估为零」是两回事。
+    if [[ "$QUOTA_ESTIMATE" != "1" ]]; then
+      echo "(estimation disabled, QUOTA_ESTIMATE=0)"
+    else
+      base_ts=$(quota_state_get '.fetched_ts' 0)
+      lead=$(( now - base_ts ))
+      # ⚠️ Distinguish "no reading in the ledger at all" from "the last reading is
+      #    old". With no ledger, base_ts is 0 and `now - 0` is a number in the
+      #    billions — printing that as an age reads like a bug and buries the real
+      #    reason, which is simply that nothing has been recorded yet.
+      # ⚠️ 要分开「台账里根本没有读数」与「上次读数太旧」。没有台账时 base_ts 是 0，
+      #    `now - 0` 是个十亿量级的数，把它当年龄印出来读起来像故障，还把真正的理由
+      #    （什么都还没记过）埋掉了。
+      if (( base_ts <= 0 )); then
+        echo "(no reading in the ledger yet -> nothing to extrapolate from; run 'quota-sentinel read-once' first)"
+      elif (( lead > QUOTA_ESTIMATE_MAX_LEAD )); then
+        echo "(${lead}s since the last real reading, past the ${QUOTA_ESTIMATE_MAX_LEAD}s extrapolation limit -> no longer extrapolating)"
+      else
+        echo "(just switched, or no usable baseline yet -> not extrapolating this round)"
+      fi
+    fi
+  fi
+
+  echo "-- state file --"
+  echo "   (all time fields are epoch seconds; ._times_readable holds the same"
+  echo "    instants rendered at $QUOTA_TZ_LABEL. Reading the epoch directly with jq"
+  echo "    strftime gives UTC instead, which is a different clock.)"
+  quota_state_read 2>/dev/null | jq . 2>/dev/null || echo "(none yet)"
+
+  echo "-- monitor session --"
+  # ⚠️ Do not print `quota_monitor_ready` directly: it looks for the **composer**,
+  #    and when the panel is open there is of course no composer on screen — a
+  #    resident panel is the intended state. The old wording printed ready=no while
+  #    everything was fine, a scary false alarm (on 2026-08-20 it caused a healthy
+  #    system to be diagnosed as broken). Three states instead of two.
+  # ⚠️ 不要直接印 quota_monitor_ready：它找的是**输入框**，而面板开着时屏幕上当然没有
+  #    输入框——面板常驻正是设计意图。旧写法在一切正常时也印 ready=no，是个吓人的假警报。
+  if ! quota_monitor_alive; then
+    echo "$QUOTA_MONITOR_SESSION is not running"
+  elif quota_monitor_shell_ready; then
+    echo "$QUOTA_MONITOR_SESSION is up, but the CLI has exited to a shell (the next round relaunches it)"
+  elif quota_monitor_panel_open; then
+    echo "$QUOTA_MONITOR_SESSION is up, /usage panel resident (normal)"
+  elif quota_monitor_ready; then
+    echo "$QUOTA_MONITOR_SESSION is up, idle at the prompt"
+  else
+    echo "$QUOTA_MONITOR_SESSION is up, but shows neither a panel nor a composer ⚠️ (starting up, or stuck)"
+  fi
+}
+
+# ── capacity ────────────────────────────────────────────────────────────
+# quota_cmd_capacity — report total Claude capacity across accounts. **It reports
+# numbers and passes no judgement**: "should this work go to Claude or elsewhere" is
+# the caller's decision, and writing that policy into the quota script would let the
+# resource situation override the fit-for-purpose judgement — which is exactly the
+# wrong thing to do at the moment when pressure is highest.
+# Exit codes: 0 = data available; 1 = not enough data (just started, too few samples);
+#             2 = no headroom left on any account.
+# **只报数，不下判断**：把策略写进额度脚本会让资源状况去覆盖任务适配判断——那正是
+# 压力最大时最容易派错人的做法。
+quota_cmd_capacity() {
+  local json=0; [[ "${1:-}" == "--json" ]] && json=1
+  local cap; cap=$(quota_state_read 2>/dev/null | jq -c '.capacity // empty' 2>/dev/null)
+  if [[ -z "$cap" ]]; then
+    (( json )) && echo '{"error":"no-data"}' || echo "⚠️ no capacity data yet (has the poller only just started?)" >&2
+    return 1
+  fi
+  if (( json )); then
+    quota_state_read | jq '{capacity: .capacity, accounts: (.accounts // {}), current: .account}'
+    :
+  else
+    quota_state_read | jq -r --argjson now "$(date +%s)" --argjson tzoff "$QUOTA_TZ_OFFSET_SEC" '
+      .capacity as $c | .account as $cur |
+      "-- total Claude capacity (\($c.accounts_known) accounts) --",
+      "weekly   used \($c.week_used_total)/\($c.accounts_known * 100)   remaining \($c.week_remaining_total) pts (\(($c.week_remaining_total * 100 / ($c.accounts_known * 100))|floor)%)",
+      (if $c.week_burn_pct_per_hour then
+         "         burn \($c.week_burn_pct_per_hour) pts/hour -> about \($c.week_runway_hours) hours of runway"
+       else "         not enough burn samples; no runway reported yet" end),
+      (if $c.week_reset_in_hours then "         earliest weekly reset in \($c.week_reset_in_hours) hours" else empty end),
+      (if $c.week_runway_hours and $c.week_reset_in_hours and ($c.week_runway_hours < $c.week_reset_in_hours) then
+         "         ⚠️ at the current burn rate this runs out **before** the weekly reset" else empty end),
+      # ⚠️ The display layer must tolerate any field being null. This is the command a
+      # human runs to see what is going on, and **an abnormal state is exactly when it
+      # most needs to still work**; letting one null abort the whole command means
+      # turning off the diagnostic at the moment you need it. Measured 2026-08-12:
+      # after the ratio accumulator was manually zeroed, cycles was still set while
+      # ratio was already null, and `null * 100` took the whole command down.
+      # ⚠️ 展示层必须容忍任意字段为 null。**状态异常时恰恰最需要它还能跑**；一个 null 就
+      # 整条命令报错，等于在最需要诊断的时候把诊断工具关掉。
+      (if ($c.week_remaining_cycles != null) and ($c.week_five_ratio != null) then
+         "         converts to ~ \($c.week_remaining_cycles) more full five-hour windows"
+         + " (1 window ~ \((($c.week_five_ratio * 100)*10|round)/10) weekly points)"
+       elif ($c.week_remaining_cycles != null) then
+         "         converts to ~ \($c.week_remaining_cycles) more full five-hour windows"
+       else empty end),
+      # Show the in-use value and the accumulated measured value separately: you can
+      # see at a glance whether the number in play was measured or seeded, where the
+      # measured one has converged to, and how many more samples until it takes over.
+      # 在用值 vs 累计实测值分开显示：一眼看出当前这个数是量出来的还是猜的。
+      (if $c.week_five_ratio_measured then
+         "         ratio in use \($c.week_five_ratio) (\($c.week_five_ratio_src|split("(")[0]))"
+         + " · measured \($c.week_five_ratio_measured)"
+         + " (dfive=\($c.ratio_sample_five)/\($c.ratio_sample_need) dweek=\($c.ratio_sample_week))"
+       elif ($c.week_five_ratio != null) then
+         "         ratio in use \($c.week_five_ratio) (seed value, no measured samples yet)"
+       else
+         "         ratio unavailable (accumulator empty; rebuilt from the seed next round)" end),
+      "five-hour  remaining \($c.five_remaining_total) pts (heals by itself)",
+      "",
+      "account           five-hour                     weekly",
+      ( (.accounts // {}) | to_entries
+        | sort_by(.value.five_reset // 9999999999)
+        | .[]
+        | . as $e
+        | ($e.key | split("@")[0]) as $name
+        | (if $e.key == ($cur // "") then "*" else " " end) as $mark
+        # Relative time: if the reset is in the future, report how long until it. If
+        # it has passed, that window has already rolled over, so the stored
+        # percentage is stale by definition and must be marked rather than shown as
+        # if it were current (which would read as "still full").
+        # 相对时间：重置在未来就报「还有多久」；已过说明那个窗口早就滚过一轮了，
+        # 存的百分比也就跟着失效，必须标出来而不是照着显示（会让人以为它还满着）。
+        | (if ($e.value.five_reset // 0) > $now
+             then "\(($e.value.five_reset + $tzoff) | strftime("%H:%M"))(in \((($e.value.five_reset - $now)/60)|floor)m)"
+             else "passed - awaiting refresh" end) as $fr
+        | (if ($e.value.week_reset // 0) > $now
+             then "\(($e.value.week_reset + $tzoff) | strftime("%m-%d %H:%M"))"
+             else "passed - awaiting refresh" end) as $wr
+        | "\($mark)\($name)"[0:17] + (" " * (18 - ([("\($mark)\($name)"|length), 17]|min)))
+          + "\($e.value.five)% resets \($fr)" + (" " * 4) + "\($e.value.week)% resets \($wr)"
+      ),
+      "",
+      # Earliest to heal = among accounts that have used up their five-hour window,
+      # which one resets first. That is the direct answer to "when does capacity come
+      # back", and it is more useful than any percentage.
+      # 最早回血 = 已经用满五小时窗口的账号里，哪个最先重置。这是「什么时候能再喘一口气」
+      # 的直接答案，比任何百分比都好用。
+      ( [ (.accounts // {}) | to_entries[]
+          | select((.value.five // 0) >= 90 and (.value.five_reset // 0) > $now) ]
+        | sort_by(.value.five_reset)
+        | if length == 0 then "(no account has used up its five-hour window right now)"
+          else "earliest to heal: \(.[0].key|split("@")[0]) \((.[0].value.five_reset + $tzoff)|strftime("%H:%M")) (in \(((.[0].value.five_reset - $now)/60)|floor)m)"
+          end ),
+      "read at \(($c.updated + $tzoff)|strftime("%H:%M:%S"))"'
+  fi
+  local rem; rem=$(printf '%s' "$cap" | jq -r '.five_remaining_total // 0')
+  [[ "$rem" =~ ^[0-9]+$ ]] && (( rem <= 5 )) && return 2
+  return 0
+}
+
+# ── detect ──────────────────────────────────────────────────────────────
+# The entry point that makes each detector independently verifiable: feed it a text
+# file and see what the detector says. This is the point of the whole "the criteria
+# are the product" claim — a guard you cannot exercise on its own is a guard you
+# cannot prove goes red.
+# 让每条判据可独立验证的入口：喂一个文本文件，看判据怎么说。「卖点是判据」这句话的落点
+# 就在这里——一条不能单独喂输入的守卫，就是一条无法证明它会红的守卫。
+quota_cmd_detect() {
+  local kind="${1:-}" file="${2:-}"
+  [[ -r "$file" ]] || { echo "usage: quota-sentinel detect <menu|banner|reset> <file>" >&2; return 2; }
+  local text; text=$(<"$file")
+  case "$kind" in
+    menu)   if quota_menu_present "$text"; then echo "menu=yes"; else echo "menu=no"; fi ;;
+    banner) local s; if s=$(quota_banner_present "$text"); then echo "banner=$s"; else echo "banner=no"; fi ;;
+    reset)  local e; if e=$(quota_parse_reset_epoch "$text"); then
+              echo "reset=$e ($(quota_fmt_ts "$e" '%Y-%m-%d %H:%M'))"; else echo "reset=no"; fi ;;
+    *) echo "unknown detector: $kind" >&2; return 2 ;;
+  esac
+}
+
+# ── env ─────────────────────────────────────────────────────────────────
+# Print the resolved configuration. This exists because every "it does not work on my
+# machine" report about this tool has so far come down to a path or an offset
+# resolving somewhere the reporter did not expect.
+# 打印解析后的配置。它存在的理由：到目前为止每一次「在我机器上跑不起来」都归结为某个
+# 路径或偏移量解析到了报告者没料到的地方。
+quota_cmd_env() {
+  printf '%-28s %s\n' \
+    QS_ROOT              "$QS_ROOT" \
+    QS_STATE_DIR         "$QS_STATE_DIR" \
+    QUOTA_STATE          "$QUOTA_STATE" \
+    QUOTA_LOG            "$QUOTA_LOG" \
+    QUOTA_CLAUDE_JSON    "$QUOTA_CLAUDE_JSON" \
+    QUOTA_CREDENTIALS_FILE "$QUOTA_CREDENTIALS_FILE" \
+    QUOTA_MONITOR_SESSION "$QUOTA_MONITOR_SESSION" \
+    QUOTA_MONITOR_LAUNCH "$QUOTA_MONITOR_LAUNCH" \
+    QUOTA_SNAPSHOT_TOOL  "$QUOTA_SNAPSHOT_TOOL" \
+    QUOTA_TZ_OFFSET_SEC  "$QUOTA_TZ_OFFSET_SEC" \
+    QUOTA_TZ_LABEL       "$QUOTA_TZ_LABEL" \
+    QUOTA_FALLBACK_TZ    "${QUOTA_FALLBACK_TZ:-(local)}" \
+    QUOTA_RETIRED_ACCOUNTS "${QUOTA_RETIRED_ACCOUNTS:-(empty)}" \
+    QUOTA_DISABLED_ACCOUNTS "${QUOTA_DISABLED_ACCOUNTS:-(empty)}"
+}
+
+quota_usage_text() {
+  cat >&2 <<'USAGE'
+usage: quota-sentinel <command>
+
+  status            human-readable quota, estimate, state file and monitor session
+  read-once         run one reading cycle: refresh /usage if due, apply, record
+  capacity [--json] total capacity across accounts
+  monitor-ensure    just make sure the monitor session exists
+  monitor-restart   restart the monitor session
+  detect <kind> <file>
+                    exercise one detector against a text file (kind: menu|banner|reset)
+  env               print the resolved configuration and paths
+  deps              check required and optional commands
+
+  Not in this milestone: account switching and the switch ledger.
+  本里程碑尚未包含：切号与切号流水账。
+USAGE
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  case "${1:-status}" in
+    status)          quota_require_deps && quota_cmd_status ;;
+    read-once)       quota_require_deps && quota_monitor_op_run wait quota_read_once ;;
+    capacity)        shift; quota_require_deps && quota_cmd_capacity "$@" ;;
+    monitor-ensure)  quota_require_deps && quota_monitor_op_run wait quota_monitor_ensure && echo "monitor session ready" ;;
+    monitor-restart) quota_require_deps && quota_monitor_op_run wait quota_monitor_restart && echo "monitor session restarted" ;;
+    detect)          shift; quota_cmd_detect "$@" ;;
+    env)             quota_cmd_env ;;
+    deps)            quota_require_deps && echo "all required commands present" ;;
+    # Hidden entry points: called only by this script's own async workers and the
+    # dedicated monitor session. Not part of the human-facing surface.
+    # 隐藏入口：只供本脚本的异步 worker / 专用 monitor 调用，不属于人工操作面。
+    shadow-oauth-sample)      quota_shadow_oauth_sample ;;
+    shadow-poller)            quota_shadow_poller_loop ;;
+    shadow-statusline-ingest) shift; quota_shadow_statusline_ingest "$@" ;;
+    -h|--help|help)  quota_usage_text; exit 0 ;;
+    *)               quota_usage_text; exit 2 ;;
+  esac
+fi
