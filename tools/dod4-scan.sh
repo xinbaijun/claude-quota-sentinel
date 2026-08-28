@@ -176,7 +176,23 @@ if [ -n "$ALLOW_PAT" ]; then
     case "$line" in
       '[D-identity]'*|'[E-path]'*) printf '%s\n' "$line" >> "$kept"; continue ;;
     esac
-    if printf '%s' "$line" | sed -E "s/$ALLOW_PAT//g" | grep -qaE "$CONTENT_PAT"; then
+    # ⚠️ The match is a here-string, not the tail of a pipe. Under `set -o pipefail`
+    #    (set at the top of this file) a `grep -q` that exits on its first match leaves
+    #    the upstream stage writing into a closed pipe; that stage dies of SIGPIPE and
+    #    the pipeline reports 141 **even though the pattern matched** — so a real hit
+    #    would be silently dropped from the results and the scan would print CLEAN.
+    #    ⚠️ Honest scope: unlike the detectors in lib/, this particular shape was NOT
+    #    reproduced here (360 attempts across two input sizes, zero drops — the
+    #    producer is `sed`, not bash's builtin `printf`). It is hardened anyway because
+    #    the failure direction is a silent DoD-4 pass, which is the one direction where
+    #    nobody goes looking.
+    # ⚠️ 这里用 here-string 而不是管道末端。本文件开着 pipefail，而 grep -q 一命中就退出，
+    #    上游写进已关闭的管道 → SIGPIPE → **整条管道回报 141，尽管命中了** ⇒ 一条真命中会被
+    #    悄悄从结果里丢掉，扫描印出 CLEAN。⚠️ 口径要诚实：与 lib/ 里那几处不同，这个形状
+    #    **没能复现**（两种输入尺寸共 360 次，零丢失；这里的上游是 sed，不是 bash 内建
+    #    printf）。仍然加固，因为它的失效方向是「静默的 DoD-4 通过」——那正是没人会去查的方向。
+    _line_filtered=$(printf '%s' "$line" | sed -E "s/$ALLOW_PAT//g")
+    if grep -qaE "$CONTENT_PAT" <<<"$_line_filtered"; then
       printf '%s\n' "$line" >> "$kept"
     fi
   done < "$hits"
