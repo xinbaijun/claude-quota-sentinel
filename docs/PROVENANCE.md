@@ -364,6 +364,8 @@ them were carried across; the plumbing around them was replaced.
 | `:65–66` session prefix, services session | dropped (the first serves a feature that is not extracted; the second was dead code) / 删（前者服务未抽取的功能，后者是死配置） |
 | `:68–83` monitor session | kept; the session name lost its prefix, and the hard-coded machine-local proxy became `QUOTA_MONITOR_PROXY`, empty by default / 保留；会话名去掉前缀，写死的本机代理改为默认留空的 `QUOTA_MONITOR_PROXY` |
 | `:85–126` thresholds, cadence, rate adaptation | kept verbatim, incident notes and all / 原样保留，含全部事故注释 |
+| `:263` switch debounce (`QUOTA_SWITCH_MIN_INTERVAL`) | **restored 2026-08-28.** Upstream it gated a safety valve that is not extracted; here it gates the "nowhere to switch to" report, which otherwise repeats on every decision beat and appends a ledger line each time / **2026-08-28 补回**。上游它守的是一个未抽取的安全闸；这里它守「无处可切」那条报告，否则每一拍都会重复、并每拍往流水账追加一条 |
+| `:576` account-drift log interval (`QUOTA_ACCOUNT_DRIFT_LOG_INTERVAL`) | **restored 2026-08-28.** It was dropped during extraction while `lib/state.sh` still read it; under `set -u` that is not a warning but an immediate process exit, on the one branch whose purpose is to notice an external account change / **2026-08-28 补回**。抽取时漏掉而 `lib/state.sh` 一直在读它；`set -u` 下那不是警告而是进程当场退出，且恰好发生在「发现别人改了账号」那条分支上 |
 | `:170–185, 207–216` estimation | kept / 保留 |
 | `:223–248` fetch window, panel sampling, runtime globals | kept / 保留 |
 | `:274–312` account roster | kept, **defaults emptied** (upstream defaulted to a real roster) and every real name replaced — see REDACTION.md / 保留，**默认值清空**（上游默认值是一份真实名册），真实人名全部替换 |
@@ -377,6 +379,65 @@ them were carried across; the plumbing around them was replaced.
 | `:1952–1957` window horizons | kept / 保留 |
 | `:2447–2477` readable-time normalisation | kept; the fixed +8h offset became the resolved local offset / 保留；固定 +8 小时偏移换成解析出来的本机偏移 |
 | `:3645–3676` capacity and ratio constants | kept, including the -0.434 contamination story / 保留，含 -0.434 那次污染的记录 |
+
+### `test/`  ←  `scripts/test/sentinel-quota.test.sh` (+ one older commit)
+
+| piece / 部分 | source / 来源 |
+|---|---|
+| `test/quota-sentinel.test.sh` | `e2f32279:scripts/test/sentinel-quota.test.sh` (4407 lines, sha256 `0a06209ffe1e…`) |
+| `test/fixtures/*.txt` (11 files, 5908 bytes) | `e2f32279:scripts/test/fixtures/sentinel-quota/` — copied byte for byte, nothing redacted (they were already free of addresses, paths and session names) |
+| `test/fixtures/legacy-detectors.sh` | **a different commit**: `54bcfa0:scripts/sentinel-daemon` — the last version that still carried the pre-rewrite detectors. See that file's own header for the four provenance items and for what its checksum does and does not prove. |
+| `test/MIGRATION.md` | not extracted — written here. It accounts for all 102 upstream case groups, one row each. |
+| `test/posctrl.sh` | not extracted — written here. |
+
+⚠️ **The suite is not a complete copy and the difference is not small.** 102 upstream
+groups became 59 here. `test/MIGRATION.md` is the per-group account; read it before
+concluding anything from "the tests pass". In particular, ten groups assert invariants
+that are entirely general (at-most-once, persist-before-acting, ABA generations) and are
+absent here only because the subsystem they were written against was not extracted.
+⚠️ **这套回归不是完整副本，而且差得不少**：上游 102 组，本仓 59 组。逐组账在
+`test/MIGRATION.md`；在从「测试通过」推出任何结论之前先读它。
+
+## Corrected against the baseline / 相对基线做了订正
+
+Distinct from "Rewritten" below: these functions differ from the baseline **text** while
+their intended behaviour is unchanged. They are here because the baseline shape is
+defective, not because its inputs are unavailable. A reader diffing against the baseline
+will see the difference and needs to see why.
+与下面的「重写」分开：这些函数与基线的**文本**不同，而意图行为未变。它们出现在这里是因为
+基线那个写法本身有缺陷，不是因为它的输入在这边拿不到。拿基线来 diff 的人会看到差异，
+必须能看到理由。
+
+| here / 本仓 | baseline / 基线 | what changed / 改了什么 |
+|---|---|---|
+| `quota_menu_present` (`lib/detect.sh`) | `sentinel-quota:2337–2351` | three `printf … \| grep -q` pipelines became here-strings |
+| `quota_monitor_ready`, `quota_monitor_wait_ready`, `quota_monitor_exit_to_shell`, `quota_panel_frame_status`, `quota_monitor_open_usage` (`lib/monitor.sh`) | `sentinel-quota:1403–1441, 1512–1555, 1787–1832, 2062–2090` | same change, eleven match sites in total |
+| `quota_switch_perform` (`lib/switch.sh`) | no baseline (written here) | reads the identity back after the switch and moves the guard fence; see the note at its definition |
+
+🔴 **Why.** All of these run under `set -o pipefail`, and `grep -q` exits the moment it
+matches — which leaves the producer writing into a closed pipe. The producer dies of
+SIGPIPE and the **pipeline reports 141 even though the pattern matched**, so the caller
+reads "no match". Measured on the extracted copy of the baseline code, on an idle
+machine: 61 misses in 800 calls to `quota_menu_present` (7.6%), and at least one miss in
+9 of 10 consecutive regression runs. A here-string is a redirection, not a pipeline:
+there is nothing to SIGPIPE and pipefail has nothing to propagate.
+⭐ The symptom is a detector that intermittently reports "no menu" while a menu is on
+screen — the same consequence as the wording-anchored detector that went silently dead
+for 28 days, arriving by a different route, and looking like load-related flakiness
+rather than a defect.
+🔴 **为什么**：这些函数都在 `set -o pipefail` 下运行，而 `grep -q` 一命中就退出，上游还在
+往一根已关闭的管道里写 ⇒ 上游被 SIGPIPE 打死，**整条管道回报 141，尽管模式命中了**，
+调用方读到「没匹配」。在抽取出来的同一份基线代码上、空闲机器实测：
+`quota_menu_present` 800 次错 61 次（7.6%），连续 10 轮回归里 9 轮至少错一次。
+here-string 是重定向不是管道：没有东西会 SIGPIPE，pipefail 也就无从传播。
+⭐ 症状是判据间歇性地在「屏上有选单」时报「没有选单」——与当年那次「文案改了就哑掉 28 天」
+后果相同、路径不同，而且**看起来像负载抖动，不像缺陷**。
+
+⚠️ The baseline still has this shape (18 sites at `e2f32279`, and `set -uo pipefail` on
+its line 43). That is reported, not fixed: this repository does not change the system it
+was extracted from.
+⚠️ 基线仍然是这个写法（`e2f32279` 里 18 处，其第 43 行同样是 `set -uo pipefail`）。
+这只报告、不修改：本仓不动它被抽取出来的那套系统。
 
 ## Rewritten, and why / 重写了什么，为什么
 
@@ -415,5 +476,4 @@ see immediately that it was a decision, not an oversight.
 | on-screen banner as a data source (`quota_banner_pressure`, `quota_banner_reading`, `quota_banner_sample_apply`) | reads a screen-recording archive of every session in that environment / 读的是那套环境里全部会话的屏幕留档 |
 | the supervising daemon interface (`quota_state_cache_refresh`, `quota_session_blocked`) and its lookup cache | there is no such daemon here / 本仓没有那个 daemon |
 | account switching: candidate ranking, the switch ledger, exhaustion handling, manual switch (`quota_try_switch`, `quota_switch_to`, `quota_accounts`, `quota_all_exhausted`, `quota_account_switch_record`, `quota_cmd_switches`, …) | **a later milestone**, not a rejection. The seam where it attaches is written out explicitly at the end of `quota_read_once`. / **后续里程碑**，不是否决。它接回来的接缝在 `quota_read_once` 末尾显式写出来了。 |
-| the regression suite (`scripts/test/sentinel-quota.test.sh`) | a later milestone / 后续里程碑 |
 | `scripts/fleet-env.sh` as a file | only 5 of its 977 lines are consumed by this chain, and the rest contains unrelated real addresses. **Never copy that file whole.** / 这条链只消费它 977 行里的 5 个符号，其余部分含无关的真实地址。**绝不要整份复制它。** |

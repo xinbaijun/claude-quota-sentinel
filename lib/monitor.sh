@@ -16,6 +16,21 @@
 # 二、监控会话（专用 cc 会话，只发 /usage，从不与模型对话）
 # ════════════════════════════════════════════════════════════════════════
 
+# 🔻 CORRECTED (pipefail + SIGPIPE) — five functions in this file differ from the
+#    baseline text: every `printf … | grep -q` was rewritten as a here-string. The
+#    intended behaviour is unchanged; the baseline shape is defective. Under
+#    `set -o pipefail`, `grep -q` exits on its first match, the producer dies of
+#    SIGPIPE, and the pipeline reports 141 **even though the pattern matched** — so the
+#    caller reads "no match". Measured at 7.6% on the equivalent detector.
+#    Affected: quota_monitor_ready, quota_monitor_wait_ready,
+#    quota_monitor_exit_to_shell, quota_panel_frame_status, quota_monitor_open_usage.
+#    Full reasoning and the measurement: docs/PROVENANCE.md "Corrected against the
+#    baseline". Each of the five carries a one-line marker at its definition.
+# 🔻 已订正（pipefail + SIGPIPE）——本文件有五个函数与基线文本不同：所有
+#    `printf … | grep -q` 都改成了 here-string。意图行为未变，是基线那个写法本身有缺陷：
+#    `set -o pipefail` 下 grep -q 一命中就退出，上游被 SIGPIPE 打死，**整条管道回报 141,
+#    尽管命中了** ⇒ 调用方读到「没匹配」。等价判据上实测 7.6%。理由与实测见
+#    docs/PROVENANCE.md「相对基线做了订正」。五个函数各自的定义处都有一行标记。
 quota_monitor_alive() { tmux has-session -t "$QUOTA_MONITOR_SESSION" 2>/dev/null; }
 
 # 专用 monitor 的 session 名一直被当作 pane target 使用，因此它必须维持单 pane。
@@ -66,6 +81,7 @@ quota_monitor_shell_ready() {
 }
 
 # quota_monitor_ready — pane 底部出现 composer 即就绪（占位提示也算，见 QUOTA_COMPOSER_REGEX）
+# 🔻 CORRECTED (pipefail/SIGPIPE) — see the note at the top of this file. / 见文件开头那段。
 quota_monitor_ready() {
   local t
   quota_monitor_shell_ready && return 1
@@ -76,6 +92,7 @@ quota_monitor_ready() {
   grep -qE "$QUOTA_COMPOSER_REGEX" <<<"$t12"
 }
 
+# 🔻 CORRECTED (pipefail/SIGPIPE) — see the note at the top of this file. / 见文件开头那段。
 quota_monitor_wait_ready() {
   local attempts i t ready_sec="$QUOTA_MONITOR_READY_SEC"
   [[ "$ready_sec" =~ ^[0-9]+$ ]] || ready_sec=40
@@ -167,6 +184,7 @@ quota_monitor_ensure() {
 
 # 只退出 pane 内的 cc，不动 tmux session/window/pane。先拿到 composer 正证，再发
 # `/exit`；退出后回读 shell 与容器三元组，任何一步不确定都 fail closed。
+# 🔻 CORRECTED (pipefail/SIGPIPE) — see the note at the top of this file. / 见文件开头那段。
 quota_monitor_exit_to_shell() {
   local before after frame typed=0 attempts i exit_sec="$QUOTA_MONITOR_EXIT_SEC"
   quota_monitor_alive || return 1
@@ -412,6 +430,7 @@ quota_panel_field() {
 
 # quota_panel_frame_status — 对**整张可见面板**做可信度分类，先判污染再取数字。
 # 错误页仍会带上一帧百分比；若先 parse，429/last-known 会被误当成新鲜额度。
+# 🔻 CORRECTED (pipefail/SIGPIPE) — see the note at the top of this file. / 见文件开头那段。
 quota_panel_frame_status() {
   local frame="$1"
   if grep -qiE 'Refreshing([.]{3}|…)?' <<<"$frame"; then
@@ -700,6 +719,7 @@ quota_monitor_prepare_owner() {
 }
 
 # composer 中选中 `/usage`，并在真正回车前持久化本次网络 attempt。
+# 🔻 CORRECTED (pipefail/SIGPIPE) — see the note at the top of this file. / 见文件开头那段。
 quota_monitor_open_usage() {
   local acct="$1" uuid="$2" generation="$3" launch_id="$4" mode="$5"
   local i typed=0 opened=0 now _uframe
