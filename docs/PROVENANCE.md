@@ -325,6 +325,30 @@ two that vanished was still in use.
 
 ### `lib/switch.sh`  ←  written for this repository, plus one restored call site
 
+Every function in this file is new; the table is here so that the "is anything
+unmapped?" question can be answered by running something rather than by trusting the
+sentence above. / 本文件里每个函数都是新写的；列出这张表，是为了让「有没有漏映射的」
+这个问题**可以靠跑一条命令回答**，而不是靠相信上面那句话。
+
+| function / 函数 | role / 作用 |
+|---|---|
+| `quota_switch_ledger_ensure` | make the ledger's directory before the first append |
+| `quota_account_switch_record` | one JSON line per decision, appended, never rewritten |
+| `quota_switch_ranked_candidates` | in-service accounts, weekly headroom first |
+| `quota_switch_pick` | best candidate under **both** lines, or nothing |
+| `quota_switch_perform` | hand the credential move to `account-switch`, read the identity back, move the guard fence |
+| `quota_decide_once` | the seam `lib/state.sh` calls after every applied reading |
+| `quota_cmd_switches` | read the ledger back out |
+
+```sh
+# Completeness check, both directions. Output should be empty.
+# 覆盖面双向核对，输出应为空。
+comm -23 \
+  <(grep -hoE '^[a-z_][a-z0-9_]*\(\)' lib/*.sh quota-sentinel account-probe | sed 's/()//' | sort -u) \
+  <(grep -oE '`[a-z_][a-z0-9_]*`' docs/PROVENANCE.md | tr -d '`' | sort -u)
+```
+
+
 No upstream file corresponds to `lib/switch.sh`. Upstream's switching logic lived inline
 inside `quota_poll_once`; this milestone implements the decision half against the seam
 `lib/state.sh` already exposes (`if declare -F quota_decide_once`).
