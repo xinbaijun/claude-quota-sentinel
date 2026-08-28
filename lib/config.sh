@@ -151,6 +151,25 @@ QUOTA_SWITCH_PCT_WEEK="${QUOTA_SWITCH_PCT_WEEK:-99}"
 #    你就能用 `quota-sentinel switches` 核对它「本来会怎么切」。认可之后改一个变量即可。
 QUOTA_SWITCH_MODE="${QUOTA_SWITCH_MODE:-dry-run}"
 
+# How long to stay quiet after a decision round found nowhere to switch to.
+# 一轮判定发现「无处可切」之后，安静多久。
+#
+# 🔴 This is not a cosmetic log knob. When every in-service account is at or over a
+#    line — which upstream measured as an all-day, every-day state once the roster
+#    shrank to one usable account — the "nowhere to go" branch is reached on **every**
+#    decision beat. Upstream that flooded the log (hundreds of lines in five minutes,
+#    measured 2026-08-24 12:00). Here it would also append a ledger line every beat,
+#    and the ledger is the audit trail: burying it is worse than burying the log.
+#    ⚠️ Quiet is not silence forever. After this window the attempt is made again and
+#    said out loud again — a gate that never reopens is much worse than a noisy one.
+# 🔴 这不是个日志美观开关。当在役账号全都在线上（上游实测：名册缩到只剩一个可用账号
+#    之后，这个状态天天出现、持续数小时），「无处可切」分支**每一拍**都会走到。上游那次
+#    把日志刷了几百行（2026-08-24 12:00 实撞）。在本仓它还会**每拍往流水账追加一条**，
+#    而流水账是审计线索——把它埋掉比把日志埋掉更糟。
+#    ⚠️ 安静不是永久闭嘴：窗口过后必须重新尝试、重新出声。一道再也不打开的闸，
+#    比一道吵闹的闸糟得多。
+QUOTA_SWITCH_MIN_INTERVAL="${QUOTA_SWITCH_MIN_INTERVAL:-300}"
+
 # The switch ledger. Append-only JSONL: one line per decision, including the ones that
 # decided NOT to switch. See lib/switch.sh for why the non-events are recorded too.
 # 切号流水账。只追加的 JSONL,每个决定一行,**包括决定不切的那些**;理由见 lib/switch.sh。

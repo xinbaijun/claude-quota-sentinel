@@ -120,6 +120,13 @@ source "$QS_SOURCE/lib/detect.sh"   || { echo "cannot load lib/detect.sh" >&2; e
 source "$QS_SOURCE/lib/switch.sh"   || { echo "cannot load lib/switch.sh" >&2; exit 1; }
 # shellcheck source=lib/state.sh
 source "$QS_SOURCE/lib/state.sh"    || { echo "cannot load lib/state.sh" >&2; exit 1; }
+# The CLI itself, for the display-layer commands. It guards its own dispatch with
+# `[[ "${BASH_SOURCE[0]}" == "$0" ]]`, so sourcing it defines the functions without
+# running a command.
+# CLI 本身，为的是展示层那几个命令。它自己用 BASH_SOURCE/$0 守住了 dispatch，
+# source 它只会定义函数，不会执行命令。
+# shellcheck source=quota-sentinel
+source "$QS_SOURCE/quota-sentinel"  || { echo "cannot load the CLI" >&2; exit 1; }
 
 QUOTA_LOG="$TMP/quota.log"
 QUOTA_STATE="$TMP/quota-state.json"
@@ -1672,10 +1679,1055 @@ _stub_restore quota_account_guard quota_reap_dead_sessions quota_monitor_refresh
 #    **而不是**改成一条碰巧能通过的形式。若以后补上候选测量，这段要一起补回来。
 }
 
+# ── shadow sampling / 影子采样 ──
+
+run_shadow_tests() {
+  echo "── 影子采样：两条新来源只记账，不参与额度决策 ──"
+  _stub_save quota_log
+  quota_log() { printf '[test] %s\n' "$1" >> "$QUOTA_LOG"; }
+  rm -f "$QUOTA_SHADOW_OAUTH_STATE" "$QUOTA_SHADOW_OAUTH_EVENTS" "$QUOTA_SHADOW_OAUTH_LOCK" \
+        "$QUOTA_SHADOW_STATUSLINE_STATE" "$QUOTA_SHADOW_STATUSLINE_EVENTS" "$QUOTA_SHADOW_STATUSLINE_LOCK" \
+        "$QUOTA_SHADOW_SCHEDULE_STATE" "$QUOTA_SHADOW_SCHEDULE_LOCK" \
+        "$QUOTA_SOURCE_EVENTS" "$QUOTA_SOURCE_EVENTS_LOCK"
+
+  # ⚠️ 2026-08-21 改判：本用例原先断言 OAuth shadow poller **必须默认停用**。
+  #    那是 2026-08-13 的决定——当时实测 28 次查询里 25 次被限流（成功率 7%），
+  #    于是整条路关掉。后来重新验证过：限流的真正原因是**查询间隔太密**，
+  #    正常 token 在 ≥180s 间隔下 7/7 全部成功。据此用户拍板重新打开。
+  #    所以现在要守的不再是「必须关」，而是「开了也不能烧接口次数」——
+  #    即节流间隔不得低于地板价。断言跟着决定走，否则用例会一直红着挡路。
+  if [[ "$QUOTA_SHADOW_OAUTH_ENABLED" == "1" ]] \
+     && [[ "$QUOTA_SHADOW_OAUTH_INTERVAL" =~ ^[0-9]+$ ]] \
+     && (( QUOTA_SHADOW_OAUTH_INTERVAL >= 180 )); then
+    pass "OAuth shadow poller 已启用，且采样间隔不低于 180s 地板价（${QUOTA_SHADOW_OAUTH_INTERVAL}s）"
+  else
+    fail "OAuth 采样配置越界（enabled=$QUOTA_SHADOW_OAUTH_ENABLED interval=$QUOTA_SHADOW_OAUTH_INTERVAL）—— 间隔低于 180s 会重演 08-13 的 25/28 限流"
+  fi
+
+  local schedule
+  schedule=$(quota_shadow_schedule 100000 2>/dev/null || true)
+  if [[ -n "$schedule" ]] \
+     && [[ "$(printf '%s' "$schedule" | jq -r '.stage,.interval_seconds' | paste -sd/ -)" == "1/20" ]] \
+     && [[ "$(quota_shadow_schedule 100600 2>/dev/null | jq -r '.stage,.interval_seconds' | paste -sd/ -)" == "2/40" ]] \
+     && [[ "$(quota_shadow_schedule 101200 2>/dev/null | jq -r '.stage,.interval_seconds' | paste -sd/ -)" == "3/60" ]] \
+     && [[ "$(quota_shadow_schedule 101800 2>/dev/null | jq -r '.stage,.interval_seconds' | paste -sd/ -)" == "4/120" ]] \
+     && [[ "$(quota_shadow_schedule 102400 2>/dev/null | jq -r '.stage,.interval_seconds' | paste -sd/ -)" == "4/120" ]]; then
+    pass "四个 10 分钟阶段依次为 20s/40s/60s/120s，结束后保持 120s"
+  else
+    fail "四阶段采样节奏不符合 20s/40s/60s/120s"
+  fi
+  rm -f "$QUOTA_SHADOW_SCHEDULE_STATE" "$QUOTA_SHADOW_SCHEDULE_LOCK"
+
+  QUOTA_STATE="$TMP/shadow-main-state.json"; QUOTA_CACHE_MTIME=""
+  cat > "$QUOTA_STATE" <<'JSON'
+{"phase":"near","account":"shadow@x","five_hour":91,"seven_day":88,
+ "monitor_account":"shadow@x","monitor_uuid":"uuid-shadow","monitor_session_created":"4242",
+ "monitor_launch_id":"launch-shadow",
+ "accounts":{"shadow@x":{"five":91,"week":88}}}
+JSON
+  local main_before payload event count launch
+  main_before=$(sha256sum "$QUOTA_STATE" | awk '{print $1}')
+  payload='{"session_id":"claude-session-1","version":"2.1.226","rate_limits":{"five_hour":{"used_percentage":12.5,"resets_at":1893474000},"seven_day":{"used_percentage":34,"resets_at":1893888000}}}'
+
+  _stub_save quota_identity_read quota_session_created quota_monitor_live_launch_id
+  quota_identity_read() { printf 'shadow@x\037uuid-shadow\037uuid-shadow\n'; }
+  quota_session_created() { printf '4242\n'; }
+  quota_monitor_live_launch_id() { printf 'launch-shadow\n'; }
+
+  if printf '%s' "$payload" | quota_shadow_statusline_ingest \
+       "shadow@x" "uuid-shadow" "4242" "launch-shadow" >/dev/null 2>&1 \
+     && [[ -s "$QUOTA_SHADOW_STATUSLINE_EVENTS" ]]; then
+    pass "statusLine 有效帧写入独立 JSONL"
+  else
+    fail "statusLine 有效帧未写入独立 JSONL"
+  fi
+  event=$(tail -n 1 "$QUOTA_SHADOW_STATUSLINE_EVENTS" 2>/dev/null || true)
+  if [[ -n "$event" ]] && printf '%s' "$event" | jq -e '
+      .source == "statusline"
+      and .decision_eligible == false
+      and .account.email == "shadow@x"
+      and .account.uuid == "uuid-shadow"
+      and .monitor.generation == "4242"
+      and .monitor.launch_id == "launch-shadow"
+      and .observed_at > 0
+      and .cadence.stage == 1
+      and .cadence.interval_seconds == 20
+      and .windows.five_hour.period_seconds == 18000
+      and .windows.five_hour.used_percentage == 12.5
+      and .windows.five_hour.resets_at == 1893474000
+      and .windows.seven_day.period_seconds == 604800
+      and .windows.seven_day.used_percentage == 34
+      and .windows.seven_day.resets_at == 1893888000' >/dev/null 2>&1; then
+    pass "statusLine 记录含来源、账号、采样时刻、两个额度窗口且明确不可决策"
+  else
+    fail "statusLine 影子记录字段不完整：${event:-empty}"
+  fi
+
+  printf '%s' "$payload" | quota_shadow_statusline_ingest \
+    "shadow@x" "uuid-shadow" "4242" "launch-shadow" >/dev/null 2>&1 || true
+  if [[ -f "$QUOTA_SHADOW_STATUSLINE_EVENTS" ]]; then count=$(wc -l < "$QUOTA_SHADOW_STATUSLINE_EVENTS"); else count=0; fi
+  if (( count == 1 )); then
+    pass "statusLine 回调在当前实验频率窗口内节流"
+  else
+    fail "statusLine 相同帧重复落盘（lines=$count）"
+  fi
+
+  printf '%s' "${payload/claude-session-1/claude-session-2}" | quota_shadow_statusline_ingest \
+    "shadow@x" "uuid-shadow" "old-generation" "launch-shadow" >/dev/null 2>&1 || true
+  if [[ -f "$QUOTA_SHADOW_STATUSLINE_EVENTS" ]]; then count=$(wc -l < "$QUOTA_SHADOW_STATUSLINE_EVENTS"); else count=0; fi
+  if (( count == 1 )); then
+    pass "statusLine 旧 monitor 代际帧被丢弃，不会串账号"
+  else
+    fail "statusLine 接收了旧 monitor 代际帧"
+  fi
+
+  if launch=$(quota_monitor_launch_command "shadow@x" "uuid-shadow" "4242" "launch-shadow" 2>/dev/null) \
+     && [[ "$launch" == *"--settings"* && "$launch" == *"shadow-statusline-ingest"* \
+           && "$launch" == *"refreshInterval"* ]]; then
+    pass "专用 monitor 启动命令注入低频 statusLine 采样器"
+  else
+    fail "专用 monitor 启动命令没有注入 statusLine 采样器"
+  fi
+
+  if [[ "$(sha256sum "$QUOTA_STATE" | awk '{print $1}')" == "$main_before" ]]; then
+    pass "statusLine 采样未改主 quota-state（不进入切号/等待/恢复）"
+  else
+    fail "statusLine 采样污染了主 quota-state"
+  fi
+
+  # tmux session 不变、只在原 pane 内换 cc 时，旧 callback 的 session_created 仍相同；
+  # 必须靠独立 launch id 把上一代回调挡住。
+  quota_state_merge '.monitor_launch_id = "launch-new"' >/dev/null 2>&1
+  quota_monitor_live_launch_id() { printf 'launch-new\n'; }
+  if [[ -f "$QUOTA_SHADOW_STATUSLINE_EVENTS" ]]; then count=$(wc -l < "$QUOTA_SHADOW_STATUSLINE_EVENTS"); else count=0; fi
+  before_launch_count=$count
+  printf '%s' "${payload/claude-session-1/claude-session-old}" | quota_shadow_statusline_ingest \
+    "shadow@x" "uuid-shadow" "4242" "launch-shadow" >/dev/null 2>&1 || true
+  if [[ -f "$QUOTA_SHADOW_STATUSLINE_EVENTS" ]]; then count=$(wc -l < "$QUOTA_SHADOW_STATUSLINE_EVENTS"); else count=0; fi
+  if (( count == before_launch_count )); then
+    pass "同 tmux 代际内上一代 cc 的 statusLine callback 被 launch id 丢弃"
+  else
+    fail "旧 cc callback 冒用了未变化的 session_created"
+  fi
+  _stub_restore quota_identity_read quota_session_created quota_monitor_live_launch_id
+  main_before=$(sha256sum "$QUOTA_STATE" | awk '{print $1}')
+  # 决策状态快照：OAuth 写读数可以，动这几格不行
+  QUOTA_CACHE_MTIME=""
+  decision_phase_before=$(quota_state_get '.phase' 'null')
+  decision_wait_before=$(quota_state_get '.waiting_until' 'null')
+  decision_episode_before=$(quota_state_get '.episode' 'null')
+  decision_switch_before=$(quota_state_get '.last_switch_ts' 'null')
+  decision_sessions_before=$(quota_state_read | jq -c '.sessions // {}')
+
+  echo "── 影子采样：OAuth JSON 的成功、节流、漂移与退避 ──"
+  rm -f "$QUOTA_SHADOW_OAUTH_STATE" "$QUOTA_SHADOW_OAUTH_EVENTS" "$QUOTA_SHADOW_OAUTH_LOCK"
+  _stub_save quota_identity_read quota_shadow_oauth_http_fetch
+  quota_identity_read() { printf 'shadow@x\037uuid-shadow\037uuid-shadow\n'; }
+  quota_shadow_oauth_http_fetch() {
+    local body_file="$1" header_file="$2"
+    printf '%s' '{"five_hour":{"utilization":13,"resets_at":"2030-01-01T05:00:00+00:00"},"seven_day":{"utilization":47,"resets_at":"2030-01-07T00:00:00+00:00"}}' > "$body_file"
+    : > "$header_file"
+    printf '200'
+  }
+  if quota_shadow_oauth_sample >/dev/null 2>&1 \
+     && event=$(tail -n 1 "$QUOTA_SHADOW_OAUTH_EVENTS" 2>/dev/null) \
+     && printf '%s' "$event" | jq -e '
+          .source == "oauth_api"
+          and .decision_eligible == false
+          and .outcome == "ok"
+          and .account.email == "shadow@x"
+          and .account.uuid == "uuid-shadow"
+          and .observed_at > 0
+          and .cadence.stage == 1
+          and .cadence.interval_seconds == 20
+          and .windows.five_hour.period_seconds == 18000
+          and .windows.five_hour.used_percentage == 13
+          and .windows.five_hour.resets_at > 0
+          and .windows.seven_day.period_seconds == 604800
+          and .windows.seven_day.used_percentage == 47
+          and .windows.seven_day.resets_at > 0' >/dev/null 2>&1; then
+    pass "OAuth JSON 成功帧按账号与窗口写入独立 JSONL"
+  else
+    fail "OAuth JSON 成功帧没有正确落盘：${event:-empty}"
+  fi
+
+  quota_shadow_oauth_sample >/dev/null 2>&1 || true
+  if [[ -f "$QUOTA_SHADOW_OAUTH_EVENTS" ]]; then count=$(wc -l < "$QUOTA_SHADOW_OAUTH_EVENTS"); else count=0; fi
+  if (( count == 1 )); then
+    pass "OAuth JSON 成功采样后按低频间隔节流"
+  else
+    fail "OAuth JSON 未节流（lines=$count）"
+  fi
+
+  rm -f "$QUOTA_SHADOW_OAUTH_STATE" "$QUOTA_SHADOW_OAUTH_EVENTS" "$TMP/shadow-identity-changed"
+  quota_identity_read() {
+    if [[ -e "$TMP/shadow-identity-changed" ]]; then
+      printf 'other@x\037uuid-other\037uuid-other\n'
+    else
+      printf 'shadow@x\037uuid-shadow\037uuid-shadow\n'
+    fi
+  }
+  quota_shadow_oauth_http_fetch() {
+    local body_file="$1" header_file="$2"
+    printf '%s' '{"five_hour":{"utilization":14,"resets_at":"2030-01-01T05:00:00+00:00"},"seven_day":{"utilization":48,"resets_at":"2030-01-07T00:00:00+00:00"}}' > "$body_file"
+    : > "$header_file"
+    : > "$TMP/shadow-identity-changed"
+    printf '200'
+  }
+  quota_shadow_oauth_sample >/dev/null 2>&1 || true
+  event=$(tail -n 1 "$QUOTA_SHADOW_OAUTH_EVENTS" 2>/dev/null || true)
+  if [[ -n "$event" ]] && printf '%s' "$event" | jq -e '.outcome == "identity_changed" and .windows == null' >/dev/null 2>&1; then
+    pass "OAuth 请求途中账号变化时丢弃额度，不把值记到错误账号"
+  else
+    fail "OAuth 请求途中账号变化仍采信了额度：${event:-empty}"
+  fi
+
+  rm -f "$QUOTA_SHADOW_OAUTH_STATE" "$QUOTA_SHADOW_OAUTH_EVENTS" "$TMP/shadow-identity-changed"
+  quota_identity_read() { printf 'shadow@x\037uuid-shadow\037uuid-shadow\n'; }
+  quota_shadow_oauth_http_fetch() {
+    local body_file="$1" header_file="$2"
+    printf '%s' '{"error":{"type":"rate_limit_error"}}' > "$body_file"
+    printf 'Retry-After: 900\r\n' > "$header_file"
+    printf '429'
+  }
+  quota_shadow_oauth_sample >/dev/null 2>&1 || true
+  event=$(tail -n 1 "$QUOTA_SHADOW_OAUTH_EVENTS" 2>/dev/null || true)
+  if [[ -n "$event" ]] && printf '%s' "$event" | jq -e '
+      .outcome == "rate_limited"
+      and .windows == null
+      and (.next_due - .attempted_at) >= 900
+      and .cadence.interval_seconds >= 20' >/dev/null 2>&1 \
+     && [[ "$(jq -r '.penalty_interval // 0' "$QUOTA_SHADOW_SCHEDULE_STATE" 2>/dev/null)" -ge 40 ]]; then
+    pass "OAuth 429 尊重 Retry-After、自动降频且错误正文不进日志"
+  else
+    fail "OAuth 429 没有正确退避：${event:-empty}"
+  fi
+  schedule=$(quota_shadow_schedule "$(date +%s)" 2>/dev/null || echo '{}')
+  if [[ "$(quota_shadow_source_interval statusline "$schedule")" == "20" \
+        && "$(quota_shadow_source_interval oauth_api "$schedule")" -ge 40 ]]; then
+    pass "OAuth 拒绝只降低网络直查频率，statusLine 仍按原四阶段计划"
+  else
+    fail "OAuth penalty 错误拖慢了本地 statusLine 采样"
+  fi
+
+  quota_source_log_usage "$(date +%s)" "shadow@x" "uuid-shadow" 15 1893474000 49 1893888000
+  quota_source_log_usage_failure "$(date +%s)" "shadow@x" "uuid-shadow" "panel_stale_frame"
+  if jq -s -e '
+      any(.[]; .source == "statusline")
+      and any(.[]; .source == "oauth_api")
+      and any(.[]; .source == "usage_panel" and .decision_eligible == true)
+      and any(.[]; .source == "usage_panel" and .decision_eligible == false
+                   and .outcome == "panel_stale_frame" and .windows == null)
+      and all(.[]; has("observed_at") and has("account") and has("windows") and has("cadence"))' \
+      "$QUOTA_SOURCE_EVENTS" >/dev/null 2>&1; then
+    pass "统一逐次日志同时含 /usage、OAuth、statusLine，均带账号/时刻/窗口/频率"
+  else
+    fail "统一逐次日志缺少三方样本或比较字段"
+  fi
+
+  # ⚠️ 上游这条断言是「grep 单文件里有没有 quota_shadow_poller_ensure 的调用」。本仓被
+  #    拆成多文件，而且调用它的那个监督 daemon **未抽取** ⇒ 照搬那句 grep 只会证明
+  #    「这个名字在文件里出现过」，而它在定义处也出现。⭐ 一条只会命中定义本身的 grep，
+  #    绿得毫无分辨力。改成直接测它要守的那件事：**读数主轮不得驱动 OAuth 采样**。
+  _stub_save quota_shadow_oauth_sample quota_account_guard quota_monitor_observe quota_usage_refresh_due
+  OAUTH_DRIVEN_MARK="$TMP/oauth-driven-by-read-round"
+  rm -f "$OAUTH_DRIVEN_MARK"
+  quota_shadow_oauth_sample() { : > "$OAUTH_DRIVEN_MARK"; return 0; }
+  quota_account_guard() { QUOTA_GUARD_EMAIL='sh@x'; QUOTA_GUARD_UUID='uuid-sh'; return 0; }
+  quota_usage_refresh_due() { return 1; }
+  quota_monitor_observe() { return 0; }
+  quota_read_once >/dev/null 2>&1
+  if declare -F quota_shadow_poller_loop >/dev/null 2>&1 \
+     && declare -F quota_shadow_poller_ensure >/dev/null 2>&1 \
+     && [[ ! -e "$OAUTH_DRIVEN_MARK" ]]; then
+    pass "OAuth 走独立影子时钟：读数主轮跑完一整轮也没有触发过一次 OAuth 采样"
+  else
+    fail "OAuth 仍由 /usage 主轮驱动，20s 档会被单轮耗时拉成约 36s"
+  fi
+  # 正控：同一个标记文件在 OAuth 采样真被调用时必须出现，否则上面那条「没出现」等于没测。
+  quota_shadow_oauth_sample >/dev/null 2>&1
+  if [[ -e "$OAUTH_DRIVEN_MARK" ]]; then
+    pass "正控：标记文件在采样真被调用时确实出现（上面那条不是恒真）"
+  else
+    fail "正控没红：标记文件根本不会出现，上面那条断言不测任何东西"
+  fi
+  _stub_restore quota_shadow_oauth_sample quota_account_guard quota_monitor_observe quota_usage_refresh_due
+
+  # 🔴 一处只报不修的观察：quota_shadow_poller_ensure 在本仓**没有任何调用方**——上游是
+  #    那个未抽取的监督 daemon 每拍调它保活。本仓唯一的启动口是 CLI 的 shadow-poller
+  #    子命令，要人自己起。⇒ 影子采样在本仓默认**不会自己跑起来**。这里只把事实钉住，
+  #    不替它决定该由谁调。
+  if grep -q 'shadow-poller' "$QS_SOURCE/quota-sentinel"; then
+    pass "影子采样至少有一个可达入口（CLI shadow-poller）；ensure 保活无调用方，已记录"
+  else
+    fail "影子采样在本仓无任何可达入口：定义在那里，谁都起不动它"
+  fi
+
+  # ⚠️ 2026-08-21 改判：原先用整个状态文件的 sha256 断言「OAuth 一个字节都不许动」。
+  #    那是 OAuth 还是纯影子时的契约。用户拍板让它转为正式上游后，**写读数是它的本职**，
+  #    整文件哈希会必然变化。但它背后要防的事一点没变、而且更该精确地守住：
+  #    **OAuth 可以更新读数，但绝不能自己驱动切号/等待/恢复的状态跃迁。**
+  #    所以改成按字段守 —— 这比整文件哈希更强：哈希只会告诉你「有东西变了」，
+  #    不会告诉你变的是读数还是 phase，而这两者的后果天差地别。
+  if [[ "$(quota_state_get '.phase' 'null')" == "$decision_phase_before" ]] \
+     && [[ "$(quota_state_get '.waiting_until' 'null')" == "$decision_wait_before" ]] \
+     && [[ "$(quota_state_get '.episode' 'null')" == "$decision_episode_before" ]] \
+     && [[ "$(quota_state_get '.last_switch_ts' 'null')" == "$decision_switch_before" ]] \
+     && [[ "$(quota_state_read | jq -c '.sessions // {}')" == "$decision_sessions_before" ]]; then
+    pass "OAuth 采样只更新读数，不碰 phase/waiting/episode/last_switch/sessions（不驱动决策跃迁）"
+  else
+    fail "OAuth 采样动了决策状态：phase=$(quota_state_get '.phase' 'null')（原 $decision_phase_before）waiting=$(quota_state_get '.waiting_until' 'null')（原 $decision_wait_before）"
+  fi
+  _stub_restore quota_identity_read quota_shadow_oauth_http_fetch
+  _stub_restore quota_log
+}
+
+
+# ── the decision layer / 决策层 ──
+run_decision_tests() {
+
+echo "── 切号被挡下时不得每拍重试 ──"
+# ⚠️ 上游 2026-08-21 把决策拆成每 10s 一拍之后，「触阈值 → 无处可切」从每 60s 一次变成
+#    每 10s 一次，08-24 12:00 实撞刷了几百行。而 2026-08-24 起在役只剩一个账号，
+#    **到阈值必然无处可切**，这个状态天天出现并持续数小时——噪音会埋掉真信号。
+# 🔴 本仓的形态更糟一点：无处可切那一支除了打日志，还会**每拍往流水账追加一条 blocked**，
+#    而流水账正是事后唯一能复原「这台机器为什么在这个账号上」的东西。
+#    上游这道闸挂在 quota_switch_allowed（安全闸，未抽取）上；本仓挂在
+#    quota_switch_pick 失败这一支上。守的是同一件事，位置不同。
+TH="$TMP/throttle"; mkdir -p "$TH"
+QUOTA_STATE="$TH/state.json"; QUOTA_LOG="$TH/quota.log"; QUOTA_SWITCH_LEDGER="$TH/switches.jsonl"
+_TH_NOW=1787320000
+_th_state() {   # 只有一个在役账号且已过线 ⇒ quota_switch_pick 必然找不到候选
+  printf '{"account":"cur@x","fetched_ts":%s,"accounts":{"cur@x":{"five":95,"week":10}}}' \
+    "$(( _TH_NOW - 30 ))" > "$QUOTA_STATE"
+}
+_th_state; : > "$QUOTA_LOG"; : > "$QUOTA_SWITCH_LEDGER"
+for _i in $(seq 0 29); do quota_decide_once "$(( _TH_NOW + _i * 10 ))" >/dev/null 2>&1; done
+_th_log=$(grep -c '🛑' "$QUOTA_LOG"); _th_led=$(grep -c '"blocked"' "$QUOTA_SWITCH_LEDGER")
+if [[ "$_th_log" == "1" && "$_th_led" == "1" ]]; then
+  pass "被挡下后 5 分钟（30 拍）日志 1 条、流水账 1 条，不刷屏也不刷账"
+else
+  fail "5 分钟内日志 $_th_log 条、流水账 $_th_led 条——每拍重试会把两者都刷满"
+fi
+# ⚠️ 正控之一：静默不能变成永久闭嘴。防抖窗口过后必须能重新出声，
+#    否则一次「无处可切」之后就再也不报告了——那比刷屏严重得多。
+quota_decide_once "$(( _TH_NOW + QUOTA_SWITCH_MIN_INTERVAL + 5 ))" >/dev/null 2>&1
+if [[ "$(grep -c '🛑' "$QUOTA_LOG")" == "2" ]]; then
+  pass "正控：防抖窗口过后恢复报告（静默没变成永久闭嘴）"
+else
+  fail "窗口过后仍不出声——一次被挡就再也不报告了"
+fi
+# ⚠️ 正控之二：首次尝试不得被延迟。闸只在「已经被挡过」之后生效。
+_th_state; : > "$QUOTA_LOG"; : > "$QUOTA_SWITCH_LEDGER"
+quota_decide_once "$_TH_NOW" >/dev/null 2>&1
+if [[ "$(grep -c '🛑' "$QUOTA_LOG")" == "1" ]]; then
+  pass "正控：首次尝试立即执行，不被防抖闸延迟"
+else
+  fail "首次尝试就被压住——真该报告时会晚 ${QUOTA_SWITCH_MIN_INTERVAL}s"
+fi
+# ⚠️ 正控之三：闸不能把**能切**的那次也压住。同样在防抖窗口内，只要出现可用候选就必须切。
+#    没有这一条，上面三条用「恒拒」实现也全绿。
+printf '{"account":"cur@x","fetched_ts":%s,"accounts":{"cur@x":{"five":95,"week":10},"free@x":{"five":5,"week":5}}}' \
+  "$(( _TH_NOW - 30 ))" > "$QUOTA_STATE"
+: > "$QUOTA_LOG"
+quota_decide_once "$(( _TH_NOW + 10 ))" >/dev/null 2>&1
+if grep -q 'would switch' "$QUOTA_LOG"; then
+  pass "正控：防抖窗口内出现可用候选时照常切号（闸压的是重复报告，不是切号）"
+else
+  fail "防抖闸把真正该切的那次也压住了：$(tail -1 "$QUOTA_LOG")"
+fi
+
+echo "── 决策只读台账，且对陈旧读数 fail closed ──"
+# ⚠️ 上游 2026-08-21 第二步：判断从采集里拆出来，轮询每一拍都对着台账判一次。
+#    拆之前决策只在**面板刷新成功那一拍**发生，于是 OAuth 写进台账的新读数要等面板
+#    下次成功才被看见——而面板恰恰在逼近阈值时被限流失明（实测 27 次、中位 6.4 分钟）。
+# ⚠️ 拆开就必须配新鲜度闸，否则更糟：对着**僵住的**台账反复决策，等于每一拍都自信地
+#    按陈旧水位判一次；原来至少「没刷新就不判」。
+DC="$TMP/decide"; mkdir -p "$DC"
+QUOTA_STATE="$DC/state.json"; QUOTA_LOG="$DC/quota.log"; QUOTA_SWITCH_LEDGER="$DC/switches.jsonl"
+_DC_NOW=1787320000
+_dc_run() {  # $1=five $2=读数年龄(s)
+  printf '{"account":"cur@x","fetched_ts":%s,"accounts":{"cur@x":{"five":%s,"week":10},"free@x":{"five":5,"week":5}}}' \
+    "$(( _DC_NOW - $2 ))" "$1" > "$QUOTA_STATE"
+  : > "$QUOTA_LOG"; : > "$QUOTA_SWITCH_LEDGER"
+  quota_decide_once "$_DC_NOW" >/dev/null 2>&1
+  grep -c 'would switch' "$QUOTA_LOG"
+}
+if [[ "$(_dc_run 95 30)" == "1" ]]; then
+  pass "读数新鲜且超阈值 → 只凭台账就能判定切号（不必等面板那一拍）"
+else
+  fail "台账里已有超阈值的新读数却没判 —— 决策没接上台账"
+fi
+if [[ "$(_dc_run 40 30)" == "0" ]]; then
+  pass "读数新鲜但未到阈值 → 不切"
+else
+  fail "未到阈值也切了"
+fi
+# ⚠️ 这条是拆分带来的**新**风险，必须守死。
+if [[ "$(_dc_run 95 $(( QUOTA_FETCH_MAX_AGE + 60 )))" == "0" ]]; then
+  pass "读数超期 → 不做决策（fail closed，不按陈旧水位切号）"
+else
+  fail "拿超期读数切号 —— 每拍都会把这个错误重复一次"
+fi
+_dc_run 95 "$(( QUOTA_FETCH_MAX_AGE + 60 ))" >/dev/null
+if grep -q 'no decision this round' "$QUOTA_LOG"; then
+  pass "超期时说明了原因（上一条不是因为函数压根没跑到）"
+else
+  fail "超期时静默返回 —— 分不清『判过了没超阈值』和『压根没判』"
+fi
+# ⚠️ 正控：同一份超期读数只说一次，但换一份新的超期读数必须重新说。
+#    「每份说一次」与「说过一次就再也不说」在单次运行里长得一模一样。
+: > "$QUOTA_LOG"
+printf '{"account":"cur@x","fetched_ts":%s,"accounts":{"cur@x":{"five":95,"week":10},"free@x":{"five":5,"week":5}}}' \
+  "$(( _DC_NOW - QUOTA_FETCH_MAX_AGE - 60 ))" > "$QUOTA_STATE"
+quota_decide_once "$_DC_NOW" >/dev/null 2>&1
+quota_decide_once "$_DC_NOW" >/dev/null 2>&1
+_dc_first=$(grep -c 'no decision this round' "$QUOTA_LOG")
+printf '{"account":"cur@x","fetched_ts":%s,"accounts":{"cur@x":{"five":95,"week":10},"free@x":{"five":5,"week":5}},"decide_stale_logged":%s}' \
+  "$(( _DC_NOW - QUOTA_FETCH_MAX_AGE - 61 ))" "$(( _DC_NOW - QUOTA_FETCH_MAX_AGE - 60 ))" > "$QUOTA_STATE"
+quota_decide_once "$_DC_NOW" >/dev/null 2>&1
+_dc_second=$(grep -c 'no decision this round' "$QUOTA_LOG")
+if [[ "$_dc_first" == "1" && "$_dc_second" == "2" ]]; then
+  pass "正控：同一份陈旧读数只说一次，换一份仍会说（不是说过就永久闭嘴）"
+else
+  fail "陈旧提示的去重口径错了（同一份说了 $_dc_first 次，换一份后累计 $_dc_second 次）"
+fi
+
+echo "── 两条线同时越过时，流水账必须两条都写 ──"
+# 上游那两句原本是直接赋值，周额度那句会把五小时那句悄悄盖掉；双重耗尽在账本里只剩一个
+# 原因，读的人会据此以为五小时没事。抽取时已改成累加，这里把它钉住。
+QUOTA_STATE="$DC/both.json"; QUOTA_LOG="$DC/both.log"; QUOTA_SWITCH_LEDGER="$DC/both.jsonl"
+printf '{"account":"cur@x","fetched_ts":%s,"accounts":{"cur@x":{"five":99,"week":100},"free@x":{"five":5,"week":5}}}' \
+  "$(( _DC_NOW - 30 ))" > "$QUOTA_STATE"
+: > "$QUOTA_LOG"; : > "$QUOTA_SWITCH_LEDGER"
+quota_decide_once "$_DC_NOW" >/dev/null 2>&1
+_both=$(jq -r '.note' "$QUOTA_SWITCH_LEDGER" 2>/dev/null | tail -1)
+if [[ "$_both" == *"five_hour"* && "$_both" == *"weekly"* ]]; then
+  pass "两条线都越过时账本两条原因都在（不是后一条盖掉前一条）"
+else
+  fail "双重耗尽在账本里只留下一个原因：[$_both]"
+fi
+# 正控：只越过一条线时，账本里必须只有那一条，否则上面那条用「永远两条都写」也能过。
+printf '{"account":"cur@x","fetched_ts":%s,"accounts":{"cur@x":{"five":99,"week":10},"free@x":{"five":5,"week":5}}}' \
+  "$(( _DC_NOW - 30 ))" > "$QUOTA_STATE"
+: > "$QUOTA_SWITCH_LEDGER"
+quota_decide_once "$_DC_NOW" >/dev/null 2>&1
+_one=$(jq -r '.note' "$QUOTA_SWITCH_LEDGER" 2>/dev/null | tail -1)
+if [[ "$_one" == *"five_hour"* && "$_one" != *"weekly"* ]]; then
+  pass "正控：只越过五小时线时账本只写这一条（上面那条不是恒真）"
+else
+  fail "只越过一条线却写了两条原因：[$_one]"
+fi
+}
+
+# ── slow layer / 慢层 ──
+run_slow_tests() {
+echo "── /usage 主动刷新：clean 重开、错误页才按 r，结束后面板常驻 ──"
+# Claude Code 2.1.226 的 clean 面板没有 r action；正常到期必须 Esc→重开 /usage。
+# rate-limit/last-known/error 面板才注册 r to retry。两条路径都不能在读完后再次 dismiss。
+REFRESH_TRACE="$TMP/usage-refresh-trace"
+: > "$REFRESH_TRACE"
+_stub_save quota_monitor_prepare_owner quota_monitor_dismiss quota_monitor_panel_open \
+           quota_monitor_owner_guard quota_monitor_open_usage quota_usage_refresh_begin \
+           quota_usage_refresh_failure quota_panel_reset_epoch quota_frame_stale quota_panel_log_observation
+_stub_save quota_monitor_recover_stale_frame
+PANEL_OK=$'Current session\n  20% used\n  Resets 5:00pm (Asia/Shanghai)\nCurrent week (all models)\n  30% used\n  Resets Aug 20, 5:00pm (Asia/Shanghai)'
+REFRESH_FRAME="$PANEL_OK"
+tmux() {
+  if [[ "${1:-}" == "send-keys" ]]; then
+    printf 'send:%s\n' "${!#}" >> "$REFRESH_TRACE"
+    [[ "${!#}" == "r" ]] && REFRESH_FRAME="$PANEL_OK"
+    return 0
+  fi
+  if [[ "${1:-}" == "capture-pane" ]]; then
+    printf '%s\n' "$REFRESH_FRAME"
+    return 0
+  fi
+  return 0
+}
+sleep() { :; }
+quota_monitor_prepare_owner() {
+  QUOTA_MONITOR_CURRENT_ACCOUNT='s@x'; QUOTA_MONITOR_CURRENT_UUID='u'
+  QUOTA_MONITOR_CURRENT_GENERATION=111; QUOTA_MONITOR_CURRENT_LAUNCH_ID='launch-111'; return 0
+}
+quota_monitor_dismiss() { printf 'dismiss\n' >> "$REFRESH_TRACE"; return 0; }
+quota_monitor_panel_open() { return 0; }
+quota_monitor_owner_guard() { return 0; }
+quota_monitor_open_usage() { printf 'open\n' >> "$REFRESH_TRACE"; QUOTA_REFRESH_SEQ=1; return 0; }
+quota_usage_refresh_begin() { printf 'begin\n' >> "$REFRESH_TRACE"; QUOTA_REFRESH_SEQ=1; return 0; }
+quota_usage_refresh_failure() { return 0; }
+quota_panel_reset_epoch() { echo $(( $(date +%s) + 3600 )); }
+quota_frame_stale() { return 1; }
+quota_panel_log_observation() { :; }
+QUOTA_PANEL_LAST=""
+if quota_monitor_refresh >/dev/null 2>&1; then
+  if [[ "$(grep -c '^dismiss$' "$REFRESH_TRACE")" == "1" ]] \
+     && [[ "$(grep -c '^open$' "$REFRESH_TRACE")" == "1" ]] \
+     && ! grep -q '^send:r$' "$REFRESH_TRACE"; then
+    pass "clean 面板只在网络到期时收起并重开一次；读完不再关闭，也不发送无效 r"
+  else
+    fail "clean 面板生命周期错误：$(tr '\n' ' ' < "$REFRESH_TRACE")"
+  fi
+else
+  fail "clean 面板重开用例未完成"
+fi
+
+: > "$REFRESH_TRACE"
+REFRESH_FRAME="$PANEL_OK"$'\nUsage endpoint is rate limited. Press r to retry'
+QUOTA_PANEL_LAST=""
+if quota_monitor_refresh >/dev/null 2>&1 \
+   && grep -q '^begin$' "$REFRESH_TRACE" \
+   && grep -q '^send:r$' "$REFRESH_TRACE" \
+   && ! grep -qE '^(dismiss|open)$' "$REFRESH_TRACE"; then
+  pass "错误页到期时只按一次 r retry，不重开第二个请求；成功后仍保留面板"
+else
+  fail "错误页没有走单次 r retry：$(tr '\n' ' ' < "$REFRESH_TRACE")"
+fi
+
+: > "$REFRESH_TRACE"
+REFRESH_FRAME="$PANEL_OK"
+quota_monitor_owner_guard() { printf 'owner-guard\n' >> "$REFRESH_TRACE"; return 1; }
+quota_frame_stale() { printf 'stale-check\n' >> "$REFRESH_TRACE"; return 0; }
+quota_monitor_recover_stale_frame() { printf 'stale-restart\n' >> "$REFRESH_TRACE"; return 0; }
+if ! quota_monitor_refresh >/dev/null 2>&1 \
+   && grep -q '^owner-guard$' "$REFRESH_TRACE" \
+   && ! grep -qE '^(stale-check|stale-restart)$' "$REFRESH_TRACE"; then
+  pass "采样期账号漂移先被 owner guard 拦下，不进入 stale 判断或重启 UI"
+else
+  fail "stale 自愈抢在 panel-after 身份 bracket 前运行：$(tr '\n' ' ' < "$REFRESH_TRACE")"
+fi
+unset -f sleep; _tmux_guard_install   # 不留裸奔窗口：清桩即重装闸
+_stub_restore quota_monitor_prepare_owner quota_monitor_dismiss quota_monitor_panel_open \
+              quota_monitor_owner_guard quota_monitor_open_usage quota_usage_refresh_begin \
+              quota_usage_refresh_failure quota_panel_reset_epoch quota_frame_stale quota_panel_log_observation
+_stub_restore quota_monitor_recover_stale_frame
+
+echo "── 采样：窗口内要取最大帧，不能取「第一个稳定的」──"
+# 这是修复的另一半。旧规则「连续 N 次一致就收下」在「缓存帧先出现且重复多次、真值后到」
+# 的序列上会收下缓存帧——而这正是实测的形态（面板 +1s 给缓存、+2s 才刷新，且拉取有节流）。
+# ⚠️ 面板时刻必须动态生成为未来：写死 "Resets 3:29pm" 的话，现实时间一过 15:29，
+# 这一帧就真的属于过期窗口，被 stale 规则**正确地**拒掉——测试会在下午定时变红。
+# ⚠️ 必须锁 LC_ALL=C：date 的 %P/%b 是**跟随 locale** 的，本机中文环境下 `%P` 输出
+#    「下午」而不是「pm」，喂给解析器就是一个现实中根本不会出现的字符串——
+#    cc 面板永远是英文。不锁的话这几条用例测的不是生产逻辑，而是本机 locale，
+#    且失败文案会显示成解析器坏了，把人引向错误方向。
+PANEL_SESS_RESET=$(LC_ALL=C TZ=CST-8 date -d '+2 hours' '+%-I:%M%P')
+PANEL_WEEK_RESET=$(LC_ALL=C TZ=CST-8 date -d '+3 days' '+%b %-d, %-I:%M%P')
+mk_panel() {  # $1=session% $2=week%
+  # 末尾那行 composer 是必需的：refresh 会先确认 /usage 真落进 composer 才回车
+  printf '   Current session\n   ███   %s%% used\n   Resets %s (Asia/Shanghai)\n\n   Current week (all models)\n   ███   %s%% used\n   Resets %s (Asia/Shanghai)\n❯ /usage\n' "$1" "$PANEL_SESS_RESET" "$2" "$PANEL_WEEK_RESET"
+}
+# 序列：缓存帧 0% 连出 4 次（足够骗过 stable-2），真值 95% 后到
+FRAMES=(0 0 0 0 95 95 95 95 95 95 95 95 95 95 95 95 95 95 95 95 95 95 95 95)
+FRAME_COUNTER="$TMP/frame-i"; echo 0 > "$FRAME_COUNTER"
+tmux() {   # 只桩 capture-pane，其余调用一律成功
+  if [[ "${1:-}" == "capture-pane" ]]; then
+    # ⚠️ 计数必须落文件：调用方是 $(tmux ...) 命令替换，跑在子 shell 里，
+    # 桩函数改的变量传不回父 shell（本会话早先在另一个桩上踩过同一个坑）。
+    local i; i=$(cat "$FRAME_COUNTER" 2>/dev/null || echo 0)
+    echo $(( i + 1 )) > "$FRAME_COUNTER"
+    mk_panel "${FRAMES[$i]:-95}" 50; return 0
+  fi
+  return 0
+}
+_stub_save quota_monitor_alive quota_monitor_dismiss quota_monitor_panel_open \
+           quota_monitor_owner_guard quota_account_guard quota_session_created \
+           quota_monitor_live_launch_id quota_monitor_single_pane_id quota_snapshot
+sleep() { :; }                                  # 采样循环里的 sleep 直接跳过
+quota_monitor_alive() { return 0; }
+quota_monitor_dismiss() { return 0; }
+quota_monitor_panel_open() { return 0; }
+quota_monitor_owner_guard() { return 0; }
+quota_account_guard() { QUOTA_GUARD_EMAIL="s@x"; QUOTA_GUARD_UUID="u"; return 0; }
+quota_session_created() { echo 111; }
+quota_monitor_live_launch_id() { echo launch-111; }
+quota_monitor_single_pane_id() { echo %1; }
+quota_snapshot() { printf '0\tu\ts@x\t0\t\t0\t\n'; }
+QUOTA_STATE="$TMP/sample-state.json"
+# monitor owner/代际预置成一致，避免走进重启分支（那条路要真等 40s 就绪）
+echo '{"monitor_account":"s@x","monitor_uuid":"u","monitor_session_created":111,"monitor_launch_id":"launch-111"}' > "$QUOTA_STATE"
+QUOTA_CACHE_MTIME=""
+QUOTA_PANEL_LAST=""
+if quota_monitor_refresh >/dev/null 2>&1; then
+  IFS=$'\t' read -r sm_five sm_week _ _ <<< "$QUOTA_PANEL_LAST"
+  if [[ "$sm_five" == "95" ]]; then
+    pass "缓存帧 0% 连出 4 次仍取到真值 95%（窗口内取最大，不取第一个稳定的）"
+  else
+    fail "采样取到 ${sm_five}%，应为 95%——「第一个稳定帧」正是旧规则会收下缓存帧的原因"
+  fi
+else
+  fail "采样整体失败"
+fi
+# ── 场景 B：five 持平但 week 前进 ──
+# 只按 five 取最大会把这种帧当成"没进步"丢掉。周额度粒度更粗、爬得更慢，
+# 常常是它先动而 five 还没跳格；漏掉它会让周额度的观测慢一整轮。
+FRAMES_W=(10 10 10 10 13 13 13 13 13 13 13 13 13 13 13 13 13 13 13 13 13 13 13 13)
+echo 0 > "$FRAME_COUNTER"
+tmux() {
+  if [[ "${1:-}" == "capture-pane" ]]; then
+    local i; i=$(cat "$FRAME_COUNTER" 2>/dev/null || echo 0)
+    echo $(( i + 1 )) > "$FRAME_COUNTER"
+    mk_panel 50 "${FRAMES_W[$i]:-13}"; return 0
+  fi
+  return 0
+}
+echo '{"monitor_account":"s@x","monitor_uuid":"u","monitor_session_created":111,"monitor_launch_id":"launch-111"}' > "$QUOTA_STATE"
+QUOTA_CACHE_MTIME=""; QUOTA_PANEL_LAST=""
+if quota_monitor_refresh >/dev/null 2>&1; then
+  IFS=$'\t' read -r sw_five sw_week _ _ <<< "$QUOTA_PANEL_LAST"
+  if [[ "$sw_week" == "13" ]]; then
+    pass "five 持平(50%)但 week 由 10→13 时取到 13（不只按 five 取最大）"
+  else
+    fail "取到 week=${sw_week}%，应为 13——只按 five 比较会漏掉这类新帧"
+  fi
+else
+  fail "场景 B 采样失败"
+fi
+
+unset -f sleep mk_panel; _tmux_guard_install   # 不留裸奔窗口：清桩即重装闸
+_stub_restore quota_monitor_alive quota_monitor_dismiss quota_monitor_panel_open \
+              quota_monitor_owner_guard quota_account_guard quota_session_created \
+              quota_monitor_live_launch_id quota_monitor_single_pane_id quota_snapshot
+
+echo "── 面板解析：必须跳过 Current week (Fable) 那段 ──"
+# fixture 是 2026-08-11 从活体监控会话抓的真实面板原文。
+# 第一版解析取「Current week 之后第一个 % used」，会抓到 Fable 那段的 2%，
+# 把周额度 87% 读成 2% —— 那会让"周额度快满"完全看不见。
+if pr=$(quota_panel_parse "$(read_fx usage-panel.txt)"); then
+  IFS=$'\t' read -r p_s p_w p_sr p_wr <<< "$pr"
+  if [[ "$p_s" == "38" && "$p_w" == "87" ]]; then
+    pass "session=38% week=87%（没把 Fable 的 2% 当成周额度）"
+  else
+    fail "面板数值解析错误（session=$p_s week=$p_w，期望 38/87）"
+  fi
+  se=$(quota_panel_reset_epoch "$p_sr" || echo "")
+  we=$(quota_panel_reset_epoch "$p_wr" || echo "")
+  if [[ "$(date -d "@${se:-0}" '+%H:%M')" == "15:29" ]]; then
+    pass "session Resets 3:29pm → 本地 15:29"
+  else
+    fail "session reset 解析错误（got=$(date -d "@${se:-0}" '+%m-%d %H:%M')）"
+  fi
+  if [[ "$(date -d "@${we:-0}" '+%m-%d %H:%M')" == "08-13 14:59" ]]; then
+    pass "week Resets Aug 13, 2:59pm → 08-13 14:59（带日期的形态也认）"
+  else
+    fail "week reset 解析错误（got=$(date -d "@${we:-0}" '+%m-%d %H:%M')）"
+  fi
+else
+  fail "面板解析整体失败"
+fi
+
+echo "── 接受线：周额度只剩一点也要用，不能干等 ──"
+# 周额度花完要等好几天，干等换不来任何东西 ⇒ 周的接纳线必须**等于**切换线，把它榨到最后
+# 一点。接纳线一旦低于切换线，就会出现「手里还有额度却判定无处可切、整台机器停下来等」。
+# 五小时相反：几小时自己回血，等待真有收益，所以那一侧留余量是对的。
+# 🔴 上游把这条写成两个常量的比较（QUOTA_ACCEPT_PCT_WEEK == QUOTA_SWITCH_PCT_WEEK）。
+#    本仓没有独立的接纳线常量（见「两个窗口各自的阈值」那组的记录），照搬会读到一个
+#    不存在的变量。⇒ 改成直接测承重的那个表达式：一个 week 恰好差 1 点的候选必须被接纳。
+#    ⭐ 这也比原来那条强一点——常量相等不等于决策真的用了它。
+QUOTA_STATE="$TMP/accept-week.json"
+printf '{"account":"cur@x","accounts":{"cur@x":{"five":95,"week":10},"lastdrop@x":{"five":10,"week":%s}}}' \
+  "$(( QUOTA_SWITCH_PCT_WEEK - 1 ))" > "$QUOTA_STATE"
+if [[ "$(quota_switch_pick 'cur@x' || echo none)" == "lastdrop@x" ]]; then
+  pass "周额度只剩 1 点的候选仍被接纳（不会出现「还有额度却干等」）"
+else
+  fail "周额度还剩 1 点的候选被挡在外面，那段额度会被白白等掉"
+fi
+
+echo "── capacity 展示层必须容忍 null 字段 ──"
+# 2026-08-12 实撞：手工清零比值累加器后 cycles 还在而 ratio 已 null，
+# `null * 100` 让整条 capacity 命令报错退出。它是给人看状态的命令，
+# **状态异常时恰恰最需要它还能跑**——一个 null 就把诊断工具关掉是最坏的时机。
+QUOTA_STATE="$TMP/nullcap.json"; QUOTA_CACHE_MTIME=""
+cat > "$QUOTA_STATE" <<'JSON'
+{"account":"n@x","accounts":{"n@x":{"five":10,"week":20}},
+ "capacity":{"updated":1786000000,"accounts_known":1,"week_used_total":20,
+             "week_remaining_total":80,"five_remaining_total":90,
+             "week_remaining_cycles":6.7,"week_five_ratio":null,
+             "week_five_ratio_measured":null}}
+JSON
+if out=$(quota_cmd_capacity 2>&1) && ! printf '%s' "$out" | grep -qi 'error'; then
+  pass "ratio=null 时 capacity 仍正常输出（不再 null*100 崩掉）"
+else
+  fail "capacity 在 null 字段上报错：$(printf '%s' "$out" | grep -i error | head -1)"
+fi
+# ⚠️ 运行时输出在抽取时英文化过。断言跟着改文案，但**守的是同一件事**：
+#    降级时必须说出「不可用」，而不是打印一个 null 让读的人自己猜。
+if printf '%s' "$out" | grep -q 'ratio unavailable'; then
+  pass "如实说明比值不可用，而不是打印一个 null"
+else
+  fail "缺少可读的降级说明：$(printf '%s' "$out" | tail -3)"
+fi
+
+echo "── 预估额度：外推与它的四道闸 ──"
+ES="$TMP/estimate"; mkdir -p "$ES"
+QUOTA_STATE="$ES/state.json"; QUOTA_CACHE_MTIME=""; QUOTA_LOG="$ES/quota.log"
+_es_state() {  # $1=five $2=fetched_ts $3=burn_five $4=last_switch_ts
+  printf '{"five_hour":%s,"seven_day":5,"fetched_ts":%s,"burn_rate_five":%s,"burn_rate_week":0,"last_switch_ts":%s}\n' \
+    "$1" "$2" "$3" "$4" > "$QUOTA_STATE"; QUOTA_CACHE_MTIME=""
+}
+_es_state 50 1000 0.01 0            # 50% + 0.01%/s
+V=$(quota_estimate_values 1100)     # 外推 100s → 51
+[[ "$V" == "51 5" ]] && pass "按流速外推（50% + 0.01/s × 100s = 51%）" || fail "外推算错，得到 '$V'"
+# ⚠️ lead 必须留在 QUOTA_ESTIMATE_MAX_LEAD(=180s) 以内，否则会先被「读数太旧就不外推」
+#    那道闸挡掉，这条用例就变成在测另一件事了。
+_es_state 85 1000 0.05 0
+if quota_estimate_exceeds 1100; then pass "外推越过 90 线时报越线（85 + 0.05/s × 100s = 90）"; else fail "外推已达 90% 却没报越线"; fi
+_es_state 85 1000 0.01 0
+if quota_estimate_exceeds 1100; then fail "外推才 86% 就报越线"; else pass "外推未到线时不报越线"; fi
+# ⚠️ 切号之后、真实读数之前不外推：那一刻的速度属于**上一个账号**，
+#    拿旧账号烧得多快去推新账号，会在刚切完就立刻要求再切一次。
+# ⚠️ 这条一开始写成 lead=600，结果**因为另一个原因**而绿：600 先撞上「读数超过 180s
+#    就不外推」那道闸，于是「切号后不外推」拆没拆都一样通过。变异测试当场戳穿了它。
+#    所以 lead 必须留在 180 以内，让这条用例只可能因为要测的那道闸而通过。
+_es_state 85 1000 0.05 1050
+if quota_estimate_exceeds 1100; then fail "切号后仍用旧账号流速外推 —— 会刚切完就再切"; else pass "切号后到首次真实读数之前不外推"; fi
+# ⚠️ 外推超过上限就停：那说明查询本身坏了，是另一个问题，不该靠外推硬撑。
+_es_state 85 1000 0.01 0
+if quota_estimate_exceeds $(( 1000 + QUOTA_ESTIMATE_MAX_LEAD + 1 )); then
+  fail "读数已过期超过 ${QUOTA_ESTIMATE_MAX_LEAD}s 仍在外推"
+else
+  pass "读数过期超过上限就停止外推（不拿陈旧基准硬撑）"
+fi
+
+echo "── 提前查一次 /usage：触发条件与防抖 ──"
+# 🔴 上游有三个触发源：屏上横幅自报、并发骤增、预估已越线。前两个读的是那套环境的会话
+#    信息，**未抽取** ⇒ 本仓只剩「预估已越线」这一个。上游那两条断言（抓跨越不抓水位、
+#    并发持续高位不重复触发）在本仓**没有对象**，不搬；不改成碰巧能过的形式。
+#    ⇒ 代价要说清楚：本仓的提前查询只会被「预估外推越线」叫醒，而外推本身依赖已有读数；
+#    「一批会话刚同时开工、百分比还没动但马上要飙」那个拐点，本仓看不见。
+FR="$TMP/force-refresh"; mkdir -p "$FR"
+QUOTA_STATE="$FR/state.json"; QUOTA_LOG="$FR/quota.log"
+_stub_save quota_estimate_exceeds
+_fr_state() {  # $1=last_force_ts
+  printf '{"force_refresh_last_ts":%s}\n' "$1" > "$QUOTA_STATE"
+  : > "$QUOTA_LOG"
+}
+quota_estimate_exceeds() { return 0; }
+_fr_state 0
+if quota_refresh_force_due 10000; then
+  pass "预估已越线时触发一次提前查询"
+else
+  fail "预估越线也没触发提前查询"
+fi
+_fr_state $(( 10000 - QUOTA_FORCE_REFRESH_COOLDOWN + 5 ))
+if quota_refresh_force_due 10000; then
+  fail "防抖期内仍触发提前查询"
+else
+  pass "防抖期内不重复提前查询"
+fi
+# 正控：没有任何触发源成立时必须不触发，否则上面第一条用「恒真」实现也全绿。
+_stub_save quota_estimate_exceeds
+quota_estimate_exceeds() { return 1; }
+_fr_state 0
+if quota_refresh_force_due 10000; then
+  fail "没有任何触发源成立却仍然提前查询 —— 上面那条是恒真"
+else
+  pass "正控：没有触发源时不查（上面那条不是恒真）"
+fi
+_stub_restore quota_estimate_exceeds
+# ⚠️ 开关必须真能关掉。
+_stub_save quota_estimate_exceeds
+quota_estimate_exceeds() { return 0; }
+_fr_state 0
+QUOTA_FORCE_REFRESH=0
+if quota_refresh_force_due 10000; then
+  fail "QUOTA_FORCE_REFRESH=0 时仍提前查询（没有可回退的后门）"
+else
+  pass "QUOTA_FORCE_REFRESH=0 时完全关闭提前查询"
+fi
+QUOTA_FORCE_REFRESH=1
+_stub_restore quota_estimate_exceeds
+_stub_restore quota_estimate_exceeds
+
+echo "── OAuth 响应解析：空字段不得让后面全部错位 ──"
+# ⚠️ 2026-08-22～24 三天丢了 25 条样本（约 5%），全在当前账号低用量时段。
+#    根因不是判据太严，是**解析错位**：tab 属于 IFS 空白字符，read 会把连续制表符
+#    当成一个分隔符，中间字段一空后面全塌：
+#        服务端 0 <空> 31 <ISO>  被读成  five=0 five_iso=31 week=<ISO> week_iso=空
+#    而 resets_at 恰恰在窗口闲置时就是空的（服务端不返回没启用窗口的重置时刻）。
+#    原来那条「四个字段都必须是数字」的判据一直在**掩盖**这个错位 —— 它把错位结果
+#    挡在门外，于是从没表现成错误数值，只表现为 schema_error。
+#    ⇒ 修解析（null 换 "-" 占位），不是放松判据。
+SP="$TMP/schema-parse"; mkdir -p "$SP"
+QUOTA_STATE="$SP/state.json"; QUOTA_CACHE_MTIME=""; QUOTA_LOG="$SP/quota.log"
+QUOTA_SHADOW_OAUTH_STATE="$SP/sh.json"; QUOTA_SHADOW_OAUTH_EVENTS="$SP/ev.jsonl"
+QUOTA_SHADOW_OAUTH_LOCK="$SP/sh.lock"
+QUOTA_SHADOW_SCHEDULE_STATE="$SP/sc.json"; QUOTA_SHADOW_SCHEDULE_LOCK="$SP/sc.lock"
+_stub_save quota_identity_read quota_shadow_oauth_http_fetch
+quota_identity_read() { printf 'a@x\037u1\037u1\n'; }
+_sp_try() {  # $1=响应 JSON → 打印 outcome
+  printf '%s\n' '{"account":"a@x"}' > "$QUOTA_STATE"; QUOTA_CACHE_MTIME=""
+  rm -f "$QUOTA_SHADOW_OAUTH_STATE" "$QUOTA_SHADOW_OAUTH_EVENTS"
+  eval "quota_shadow_oauth_http_fetch() { printf '%s' \"\$SP_BODY\" > \"\$1\"; : > \"\$2\"; printf '200'; }"
+  SP_BODY="$1" quota_shadow_oauth_sample >/dev/null 2>&1
+  [[ -s "$QUOTA_SHADOW_OAUTH_EVENTS" ]] && tail -1 "$QUOTA_SHADOW_OAUTH_EVENTS" | jq -r '.outcome' || echo 无事件
+}
+if [[ "$(_sp_try '{"five_hour":{"utilization":40,"resets_at":"2030-01-01T05:00:00+00:00"},"seven_day":{"utilization":50,"resets_at":"2030-01-07T00:00:00+00:00"}}')" == "ok" ]]; then
+  pass "两窗口齐全 → ok（基准，这条不过后面没意义）"
+else
+  fail "正常响应都解析不了"
+fi
+# ⚠️ 这条是修的那个 bug 本身：闲置窗口没有 resets_at，必须照常采信。
+if [[ "$(_sp_try '{"five_hour":{"utilization":0},"seven_day":{"utilization":31,"resets_at":"2030-01-07T00:00:00+00:00"}}')" == "ok" ]] \
+   && [[ "$(quota_state_get '.seven_day' '')" == "31" ]]; then
+  pass "五小时窗口闲置(0%)、无 resets_at → 照常采信，周额度没被连坐丢掉"
+else
+  fail "闲置窗口仍被判成格式错误（三天丢 25 条的原因）"
+fi
+# ⚠️ 正控：放宽不能变成一律放行。使用率不为 0 却没有 resets_at，服务端本该知道
+#    何时重置，那是真的畸形，必须仍然拒绝 —— 否则这条闸等于拆了。
+if [[ "$(_sp_try '{"five_hour":{"utilization":40},"seven_day":{"utilization":50,"resets_at":"2030-01-07T00:00:00+00:00"}}')" == "schema_error" ]]; then
+  pass "使用率不为 0 却缺 resets_at → 仍判畸形（放宽没变成一律放行）"
+else
+  fail "真畸形响应也被收下了 —— 判据被拆掉了"
+fi
+if [[ "$(_sp_try '{"five_hour":{"resets_at":"2030-01-01T05:00:00+00:00"},"seven_day":{"utilization":50,"resets_at":"2030-01-07T00:00:00+00:00"}}')" == "schema_error" ]]; then
+  pass "缺 utilization → 判畸形（决策要用的就是它）"
+else
+  fail "缺使用率也被收下"
+fi
+_stub_restore quota_identity_read quota_shadow_oauth_http_fetch
+
+echo "── 台账多上游共写：谁的观测新用谁的 ──"
+# ⚠️ 2026-08-21 起台账有两个上游（/usage 面板、OAuth），将来还会有对话横幅。
+#    「谁当主」这个问题被架构消掉了 —— 只按观测时刻定胜负。这样做有实测依据：
+#    翻 10 天日志，面板因限流失明 27 次，其中 22 次（81%）发生在 five>=85% 的危险区，
+#    失明中位 6.4 分钟；最要命一次从 91% 一路瞎到 100%。面板逼近阈值时收紧到 60s，
+#    **问得越勤越容易被限流**，密度恰好在最需要的时候塌掉。OAuth 固定 180s 不塌。
+#    ⇒ 两个上游失败时机不重合，并联比串联强。
+UP="$TMP/upstream"; mkdir -p "$UP"
+QUOTA_STATE="$UP/state.json"; QUOTA_CACHE_MTIME=""; QUOTA_LOG="$UP/quota.log"
+_up_reset() {
+  printf '%s\n' '{"account":"cur@x","five_hour":50,"seven_day":20,"fetched_ts":1000,
+   "accounts":{"cur@x":{"five":50,"week":20,"checked_ts":1000,"source":"usage_panel"}}}' > "$QUOTA_STATE"
+  QUOTA_CACHE_MTIME=""
+}
+_up_reset
+quota_reading_apply oauth_api 1200 cur@x 66 22; _rc=$?; QUOTA_CACHE_MTIME=""
+if (( _rc == 0 )) && [[ "$(quota_state_get '.five_hour' '')" == "66" ]] \
+   && [[ "$(quota_state_get '.reading_source' '')" == "oauth_api" ]]; then
+  pass "更新的观测写入并改写顶层决策字段，来源标成 oauth_api"
+else
+  fail "新观测没写进去（rc=$_rc five=$(quota_state_get '.five_hour' '')）"
+fi
+# ⚠️ 这条是要害：旧观测**绝不能**覆盖新的。两个上游各按自己的节拍跑，迟到的包一定会
+#    出现；不挡住的话台账会在新旧值之间来回跳，切号判据跟着抖。
+quota_reading_apply oauth_api 900 cur@x 11 11; _rc=$?; QUOTA_CACHE_MTIME=""
+if (( _rc == 2 )) && [[ "$(quota_state_get '.five_hour' '')" == "66" ]]; then
+  pass "更旧的观测被拒（rc=2），台账不回退"
+else
+  fail "旧观测覆盖了新值 —— 台账会在新旧之间来回跳（rc=$_rc five=$(quota_state_get '.five_hour' '')）"
+fi
+# ⚠️ 非当前账号只更新自己那格。顶层 .five_hour 的语义是「**当前**账号还剩多少」，
+#    把别人的数写进去会直接按错误水位切号。
+quota_reading_apply oauth_api 1300 other@x 3 4; _rc=$?; QUOTA_CACHE_MTIME=""
+if (( _rc == 0 )) && [[ "$(quota_state_get '.five_hour' '')" == "66" ]] \
+   && [[ "$(quota_state_get '.accounts["other@x"].five' '')" == "3" ]]; then
+  pass "写非当前账号只落到它自己那格，顶层纹丝不动"
+else
+  fail "写别的账号污染了顶层决策字段（顶层 five=$(quota_state_get '.five_hour' '')）"
+fi
+# ⚠️ 正控：上面三条都可能因为函数压根没生效而「碰巧通过」。这里确认拒绝逻辑
+#    真的挂在**观测时刻**上，而不是恒拒——同一账号、更新的时刻，必须能再写进去。
+quota_reading_apply oauth_api 1400 cur@x 71 23; _rc=$?; QUOTA_CACHE_MTIME=""
+if (( _rc == 0 )) && [[ "$(quota_state_get '.five_hour' '')" == "71" ]]; then
+  pass "再来一个更新的观测仍能写入（拒绝逻辑没退化成恒拒）"
+else
+  fail "新观测也被拒了 —— 闸恒拒等于把这条上游整个关掉"
+fi
+_up_reset
+
+echo "── 回血盯梢：过点才查，查到就停 ──"
+# ⚠️ 判据必须是**结构性**的：「快照拍摄时刻 < 回血时刻 <= 现在」＝手上这份是回血前拍的。
+#    不能用「额度掉到多少以下」——那要挑一个阈值，而账号回血后可能立刻被别人用掉一截，
+#    阈值判据会判成「还没回血」然后一直查下去，停不了。
+WT="$TMP/watch"; mkdir -p "$WT"
+QUOTA_SNAPSHOT_FILE="$WT/snap.json"
+_WT_NOW=1787320000; _WT_RESET=$(( _WT_NOW - 600 ))
+_wt_snap() {  # $1=快照拍摄时刻 $2=other 的 five_reset
+  cat > "$QUOTA_SNAPSHOT_FILE" <<JSON
+{"generated_at":$1,"accounts":[
+ {"email":"cur@x","status":"active","is_current":true,"five_reset":$_WT_RESET,"week_reset":null},
+ {"email":"other@x","status":"active","is_current":false,"five_reset":$2,"week_reset":null}]}
+JSON
+}
+_wt_snap $(( _WT_RESET - 300 )) "$_WT_RESET"
+if quota_reset_watch_pending "$_WT_NOW"; then
+  pass "快照拍于回血前、现已过点 → 进入盯梢"
+else
+  fail "该盯没盯（后面几条就没意义了）"
+fi
+_wt_snap $(( _WT_RESET + 60 )) "$_WT_RESET"
+if quota_reset_watch_pending "$_WT_NOW"; then
+  fail "已经查到回血后的读数却还在盯 —— 停不下来，会一直烧请求"
+else
+  pass "查到回血后的读数 → 盯梢自动停"
+fi
+_wt_snap $(( _WT_NOW - 100 )) $(( _WT_NOW + 3600 ))
+if quota_reset_watch_pending "$_WT_NOW"; then
+  fail "回血时刻还没到就在盯 —— 白烧请求"
+else
+  pass "没到回血时刻不盯"
+fi
+# ⚠️ 当前账号不该开盯梢：它由 /usage 面板和 180s 影子采样各自覆盖，再开一路是重复。
+_wt_snap $(( _WT_RESET - 300 )) null
+if quota_reset_watch_pending "$_WT_NOW"; then
+  fail "为当前账号也开了盯梢（重复覆盖，白烧请求）"
+else
+  pass "只盯非当前账号"
+fi
+
+echo "── 面板失灵时 OAuth 顶上：三道闸都得能拒 ──"
+# ⚠️ 现状是面板读不到就整轮 return 1，一个数都不更新；持续失灵会让脚本拿着越来越旧的数，
+#    而且**看不出自己在瞎**。OAuth 那条线每 180s 独立采当前账号，正好补这个缺口。
+#    但它必须过三道闸，一道都不能省。
+FB="$TMP/fallback"; mkdir -p "$FB"
+QUOTA_SHADOW_OAUTH_STATE="$FB/shadow.json"
+QUOTA_STATE="$FB/state.json"; QUOTA_CACHE_MTIME=""; QUOTA_LOG="$FB/quota.log"
+_FB_NOW=1787320000
+_fb_setup() {  # $1=采样账号 $2=观测时刻
+  printf '%s\n' '{"account":"cur@x","five_hour":50,"seven_day":20,"accounts":{}}' > "$QUOTA_STATE"
+  QUOTA_CACHE_MTIME=""; : > "$QUOTA_LOG"
+  cat > "$QUOTA_SHADOW_OAUTH_STATE" <<JSON
+{"last_attempt":{"outcome":"ok","observed_at":$2,
+ "account":{"email":"$1"},
+ "windows":{"five_hour":{"used_percentage":77},"seven_day":{"used_percentage":33}}}}
+JSON
+}
+_fb_setup "cur@x" "$(( _FB_NOW - 60 ))"
+if quota_oauth_fallback_apply "$_FB_NOW" "cur@x" \
+   && [[ "$(quota_state_get '.five_hour' '')" == "77" ]] \
+   && [[ "$(quota_state_get '.reading_source' '')" == "oauth_fallback" ]]; then
+  pass "身份对、够新 → 顶上，并标明来源是 oauth_fallback"
+else
+  fail "该顶没顶上（five=$(quota_state_get '.five_hour' '') source=$(quota_state_get '.reading_source' '')）"
+fi
+# ⚠️ 闸一：身份不符绝不能用。那是**别人的额度**，拿来当自己的会切错号。
+_fb_setup "someone_else@x" "$(( _FB_NOW - 60 ))"
+if quota_oauth_fallback_apply "$_FB_NOW" "cur@x"; then
+  fail "拿了别的账号的额度顶替当前账号 —— 会据此切错号"
+else
+  pass "采样账号与当前不一致 → 拒绝顶替"
+fi
+# ⚠️ 闸二：陈旧读数比没有更危险，会让脚本以为自己看得见。
+_fb_setup "cur@x" "$(( _FB_NOW - QUOTA_OAUTH_FALLBACK_MAX_AGE - 1 ))"
+if quota_oauth_fallback_apply "$_FB_NOW" "cur@x"; then
+  fail "拿超期读数顶替 —— 脚本会以为自己看得见，其实在瞎"
+else
+  pass "采样超过 ${QUOTA_OAUTH_FALLBACK_MAX_AGE}s → 拒绝顶替"
+fi
+# ⚠️ 采样本身失败时也不能用（outcome 不是 ok）
+_fb_setup "cur@x" "$(( _FB_NOW - 60 ))"
+printf '%s\n' '{"last_attempt":{"outcome":"rate_limited","observed_at":'"$(( _FB_NOW - 60 ))"',"account":{"email":"cur@x"},"windows":{}}}' > "$QUOTA_SHADOW_OAUTH_STATE"
+if quota_oauth_fallback_apply "$_FB_NOW" "cur@x"; then
+  fail "拿一次失败的采样当读数用"
+else
+  pass "采样 outcome 不是 ok → 拒绝顶替"
+fi
+
+echo "── 账号额度快照：陈旧的必须当作没有 ──"
+# ⚠️ 这条路的危险失败模式不是「读不到」，而是**读到一份旧的却当成新的**：
+#    拿半小时前的额度排候选，会切到一个其实早就满了的账号，切过去立刻撞墙，
+#    还白白消耗一次切号配额和防抖窗口。宁可判定「没有快照」，也不交出过期数据。
+SN="$TMP/snapshot"; mkdir -p "$SN"
+QUOTA_SNAPSHOT_FILE="$SN/snap.json"
+QUOTA_STATE="$SN/state.json"; QUOTA_CACHE_MTIME=""; QUOTA_LOG="$SN/quota.log"
+printf '%s\n' '{"account":"live1@x","accounts":{"live1@x":{"five":50,"week":20}}}' > "$QUOTA_STATE"
+_snap_write() {  # $1=generated_at
+  cat > "$QUOTA_SNAPSHOT_FILE" <<JSON
+{"schema":1,"generated_at":$1,"current_account":"live1@x","accounts":[
+ {"email":"live1@x","status":"active","five_hour":50,"seven_day":20,"five_reset":null,"week_reset":null,"outcome":"ok"},
+ {"email":"live2@x","status":"active","five_hour":3,"seven_day":8,"five_reset":null,"week_reset":null,"outcome":"ok"}]}
+JSON
+}
+_SN_NOW=1787300000
+_snap_write "$_SN_NOW"
+if quota_snapshot_read "$_SN_NOW" >/dev/null; then
+  pass "新鲜快照可读"
+else
+  fail "新鲜快照被误判为不可用（后面几条就没意义了）"
+fi
+_snap_write "$(( _SN_NOW - QUOTA_SNAPSHOT_MAX_AGE - 1 ))"
+if quota_snapshot_read "$_SN_NOW" >/dev/null; then
+  fail "超过 ${QUOTA_SNAPSHOT_MAX_AGE}s 的陈旧快照仍被交出去 —— 会拿旧额度排候选"
+else
+  pass "陈旧快照判定为不可用（不交出过期数据）"
+fi
+# ⚠️ 未来时刻同样要拒。时钟跳变或别人写坏文件时，age 会算成负数；
+#    只判「太旧」的写法会让这种明显异常的数据一路绿灯通过。
+_snap_write "$(( _SN_NOW + 3600 ))"
+if quota_snapshot_read "$_SN_NOW" >/dev/null; then
+  fail "生成时刻在未来的快照被接受 —— 只判『太旧』漏掉了时钟异常这一半"
+else
+  pass "生成时刻在未来的快照也拒绝"
+fi
+: > "$QUOTA_SNAPSHOT_FILE"
+if quota_snapshot_read "$_SN_NOW" >/dev/null; then fail "空快照被接受"; else pass "空快照判定为不可用"; fi
+
+echo "── 快照现阶段只记账，不参与决策 ──"
+# ⚠️ 放行前必须先攒证据。已有的一致性证据（±60s 内差 ≤2 点、98% 成功率）**全部来自
+#    当前账号**的影子采样；查其他账号是另一条代码路径（不同 token、不同凭据文件），
+#    目前只有几次手动 probe 的证据。所以先影子跑、对账，别急着让它改变行为。
+_snap_write "$_SN_NOW"
+_before=$(cat "$QUOTA_STATE")
+: > "$QUOTA_LOG"
+quota_snapshot_shadow_compare "$_SN_NOW" >/dev/null 2>&1
+if [[ "$(cat "$QUOTA_STATE")" == "$_before" ]]; then
+  pass "影子对账没有改动任何状态"
+else
+  fail "影子对账改了状态 —— 它现在只该记账"
+fi
+# ⚠️ 运行时输出在抽取时英文化过；断言跟着改文案，守的仍是同一件事——
+#    对账必须**留下一条并排记录**，否则上面那条「状态没变」也可能只是因为它压根没跑。
+if grep -q 'shadow: reconciliation only, never decides' "$QUOTA_LOG"; then
+  pass "影子对账把快照与台账并排记了一笔（上一条不是因为它压根没跑）"
+else
+  fail "影子对账没产生记录：$(tail -1 "$QUOTA_LOG")"
+fi
+if [[ "$QUOTA_SNAPSHOT_DECIDE" == "0" ]]; then
+  pass "放行开关默认关闭（QUOTA_SNAPSHOT_DECIDE=0）"
+else
+  fail "快照默认就参与决策了 —— 证据还不够，不该默认开"
+fi
+
+}
+
+# ── the isolation gate, checked after every layer / 隔离闸，每一层跑完都查 ──
+# ⚠️ Upstream this lived at the very end of the slow layer, so `--fast` alone never
+#    checked it. The gate guards the 2026-08-19 incident (the regression reached into
+#    production sessions), and "which layer did you run" is not a sensible input to
+#    whether that check happens.
+# ⚠️ 上游这一组在慢层末尾，于是单跑 --fast 从不检查它。这道闸守的是 2026-08-19
+#    「回归伸手动了生产会话」，而「你跑的是哪一层」不该是「这个检查做不做」的输入。
+run_isolation_check() {
+echo "── 隔离闸：整轮回归不得触达真实 tmux ──"
+# ⚠️ 守的是 2026-08-19 那次「测试动了生产会话」。统计的是**会改变状态**的调用
+#    （send-keys / kill-session / new-session …）有没有漏到闸外。
+if [[ ! -s "$TMUX_VIOLATIONS" ]]; then
+  pass "全程没有未打桩的危险 tmux 调用（send-keys/kill/new-session 等）"
+else
+  fail "有 $(grep -c . "$TMUX_VIOLATIONS") 次危险调用漏到闸外：$(head -3 "$TMUX_VIOLATIONS" | tr '\n' ' ')"
+fi
+# ⚠️ 正控：闸必须真的会红。故意触发一次，确认它记得下来——否则上面那条恒绿，等于没测。
+_tmux_probe="$TMP/tmux-violations.snapshot"
+cp "$TMUX_VIOLATIONS" "$_tmux_probe"
+tmux send-keys -t __fake_probe_session__ Escape >/dev/null 2>&1 || true
+if (( $(grep -c . "$TMUX_VIOLATIONS") > $(grep -c . "$_tmux_probe") )); then
+  pass "闸在故意触发时确实记录了违规（上一条不是恒绿）"
+else
+  fail "闸抓不住 send-keys —— 上一条断言没有区分度"
+fi
+cp "$_tmux_probe" "$TMUX_VIOLATIONS"
+}
+
 case "$TEST_LAYER" in
-  fast|all) run_extraction_tests; run_fast_tests; run_monitor_tests; run_cadence_tests; run_reading_round_tests ;;
+  shadow) run_shadow_tests ;;
+  slow) run_decision_tests; run_slow_tests ;;
+  fast|all) run_extraction_tests; run_fast_tests; run_monitor_tests; run_cadence_tests; run_reading_round_tests
+            [[ "$TEST_LAYER" == all ]] && { run_shadow_tests; run_decision_tests; run_slow_tests; } ;;
   *) echo "layer $TEST_LAYER not populated yet" ;;
 esac
+run_isolation_check
 echo
 printf 'PASS %d   FAIL %d\n' "$PASS" "$FAIL"
 (( FAIL == 0 )) || exit 1

@@ -140,6 +140,36 @@ quota_decide_once() {
   week=$(printf '%s' "$snap" | jq -r --arg a "$current" '(.accounts[$a].week // empty)' 2>/dev/null)
   [[ -z "$five" || -z "$week" ]] && return 0
 
+  # ── Fail closed on a stale ledger / 台账陈旧则不判 ──────────────────────
+  # This function is a seam: today it is called right after a fresh reading, but it is
+  # a public entry point and nothing stops a caller from invoking it on a beat where
+  # no new reading arrived. Deciding from a frozen ledger is not a smaller version of
+  # deciding — it is confidently acting on a number that stopped being true, and the
+  # act it authorises rewrites live credentials.
+  # ⚠️ Say so **once per stale reading**, not once per call: the whole point of the
+  #    branch is that it can persist, and a line per beat would reproduce the flood it
+  #    is meant to avoid. But do say it — a silent return is indistinguishable from
+  #    "judged, nothing to do", and those two need opposite responses from an operator.
+  # 本函数是接缝：今天它在刚采到读数之后被调用，但它是公开入口，没有任何东西阻止调用方
+  # 在「本拍没有新读数」时调它。拿僵住的台账做判定，不是「弱一点的判定」——那是**自信地**
+  # 按一个已经不成立的数字动作，而它授权的动作会改写在用的凭据。
+  # ⚠️ **每份陈旧读数只说一次**，不是每次调用说一次：这个分支的要害正是它会持续存在。
+  #    但必须说——静默返回与「判过了、没事」长得一模一样，而这两者要求操作者做相反的事。
+  local fetched age
+  fetched=$(printf '%s' "$snap" | jq -r '(.fetched_ts // empty)' 2>/dev/null)
+  if [[ "$fetched" =~ ^[0-9]+$ ]]; then
+    age=$(( now - fetched ))
+    if (( age < 0 || age > QUOTA_FETCH_MAX_AGE )); then
+      if [[ "$(quota_state_get '.decide_stale_logged' "")" != "$fetched" ]]; then
+        quota_log "⏹ the ledger reading is ${age}s old (limit ${QUOTA_FETCH_MAX_AGE}s) -> no decision this round, waiting for a fresh one"
+        quota_state_merge '.decide_stale_logged = $f' --arg f "$fetched" || true
+      fi
+      return 0
+    fi
+    [[ -n "$(quota_state_get '.decide_stale_logged' "")" ]] \
+      && quota_state_merge '.decide_stale_logged = null' || true
+  fi
+
   # Accumulate, do not assign: when both lines are crossed the ledger has to say so.
   # These two were plain assignments, so the weekly line silently overwrote the
   # five-hour one and the ledger recorded a single cause for a double exhaustion --
@@ -153,13 +183,39 @@ quota_decide_once() {
 
   local target
   if ! target=$(quota_switch_pick "$current"); then
-    # Every in-service account is at or over a line. Say so once and plainly: this is
-    # the state operators most need named, and "nothing happened" is how it otherwise
-    # presents. Nothing is switched -- there is nowhere better to go.
+    # Every in-service account is at or over a line. Say so plainly: this is the state
+    # operators most need named, and "nothing happened" is how it otherwise presents.
+    # Nothing is switched -- there is nowhere better to go.
+    #
+    # ⚠️ Say it at most once per QUOTA_SWITCH_MIN_INTERVAL. This branch is not an
+    #    exception, it is a **condition**: once the roster has no account below both
+    #    lines it stays that way for hours, and every decision beat lands here. Saying
+    #    it every beat floods the log AND appends a ledger line per beat, which buries
+    #    the one record an operator later reads to reconstruct what happened.
+    #    ⚠️ The first attempt is never delayed, and after the window it speaks again:
+    #    the gate suppresses **repetition**, never the first report and never recovery.
+    #    A gate that stops reporting for good is a much worse failure than a loud one.
+    # ⚠️ 每 QUOTA_SWITCH_MIN_INTERVAL 最多说一次。这个分支不是异常而是一种**状态**：
+    #    一旦名册里没有账号同时低于两条线，它会持续数小时，而每一拍判定都落在这里。
+    #    每拍都说会同时刷爆日志**和**每拍往流水账追加一条，把操作者事后唯一会去读的那条
+    #    记录埋掉。⚠️ 首次尝试永不延迟，窗口过后会重新出声：闸压的是**重复**，
+    #    从不压首次报告、也从不压恢复。一道从此不再报告的闸，比一道吵闹的闸糟得多。
+    local blocked_ts; blocked_ts=$(quota_state_get '.switch_blocked_ts' "")
+    if [[ "$blocked_ts" =~ ^[0-9]+$ ]] && (( now - blocked_ts < QUOTA_SWITCH_MIN_INTERVAL )); then
+      return 0
+    fi
     quota_log "🛑 ${reason}, but every in-service account is at or over a line -> staying on ${current}"
     quota_account_switch_record "$now" "$current" "" "blocked" "$reason; no in-service account below both lines"
+    quota_state_merge '.switch_blocked_ts = $t' --argjson t "$now" || true
     return 0
   fi
+  # A candidate was found, so the "nowhere to go" condition is over. Clear the stamp,
+  # or the next time it recurs the first report would be suppressed by a window that
+  # started during a completely different episode.
+  # 找到候选说明「无处可切」这个状态已经结束。清掉时间戳，否则下次它再出现时,
+  # 首次报告会被一个属于另一段经历的窗口压住。
+  [[ -n "$(quota_state_get '.switch_blocked_ts' "")" ]] \
+    && quota_state_merge '.switch_blocked_ts = null' || true
 
   if [[ "$QUOTA_SWITCH_MODE" != "on" ]]; then
     quota_log "🔎 dry-run: ${reason} -> would switch ${current} -> ${target} (set QUOTA_SWITCH_MODE=on to act)"
