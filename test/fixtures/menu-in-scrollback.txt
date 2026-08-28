@@ -1,0 +1,15 @@
+  What do you want to do?
+  ❯ 1. Stop and wait for limit to reset
+    2. Upgrade your plan
+    3. Upgrade to Team plan
+
+  Enter to confirm · Esc to cancel
+
+● 那个框我已经手动按 Esc 清掉了，现在继续。
+
+  ⎿  Bash(git status)
+
+────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · ? for shortcuts

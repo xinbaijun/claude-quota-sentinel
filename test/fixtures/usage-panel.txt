@@ -1,0 +1,22 @@
+   Settings  Status   Config   Usage   Stats
+
+   Session
+
+   Total cost:            $0.0000
+   Total duration (API):  0s
+
+   Current session
+   ███████████████████                                38% used
+   Resets 3:29pm (Asia/Shanghai)
+
+   Current week (all models)
+   ███████████████████████████████████████████▌       87% used
+   Resets Aug 13, 2:59pm (Asia/Shanghai)
+   +50% weekly limits promo through Aug 19 · clau.de/cc-50-promo
+
+   Current week (Fable)
+   █                                                  2% used
+   Resets Aug 13, 3pm (Asia/Shanghai)
+
+   What's contributing to your limits usage?
+   Esc to cancel

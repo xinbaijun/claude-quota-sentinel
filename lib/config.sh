@@ -380,6 +380,29 @@ QUOTA_GUARD_UUID=""
 QUOTA_RETIRED_ACCOUNTS="${QUOTA_RETIRED_ACCOUNTS:-${QS_RETIRED_ACCOUNTS:-}}"
 QUOTA_DISABLED_ACCOUNTS="${QUOTA_DISABLED_ACCOUNTS:-${QS_PAUSED_ACCOUNTS:-}}"
 
+# ── Account identity guard / 账号身份守卫 ───────────────────────────────
+# A non-cooperating writer of the shared config file cannot be locked out by the
+# switching tool's own flock. The guard therefore keeps the last confirmed
+# email+UUID as a persistent expectation and re-reads it at every decision
+# boundary; while a drift persists it repeats the log line only this often.
+# 共享配置文件的非协作 writer 无法靠切号工具自己的 flock 挡住。守卫把最近一次已确认
+# 的 email+UUID 当持久期望值，每个决策边界都重读；漂移持续时只按此间隔重复打日志。
+#
+# 🔴 This line was **missing** between the extraction milestone and 2026-08-28, while
+#    lib/state.sh already read it. Under `set -u` (which the CLI sets) an undefined
+#    variable is not a warning — the shell exits. So the tool died outright on the
+#    first external account drift it detected: the one path whose entire purpose is
+#    to notice that somebody else changed the account. Nothing was green-and-wrong;
+#    there was simply no test that reached that branch, because reaching it needs a
+#    state file and a config file that disagree. The regression case that now covers
+#    it is "account guard: an unset drift-log interval must not kill the process".
+# 🔴 抽取里程碑之后到 2026-08-28 之间**缺了这一行**，而 lib/state.sh 已经在读它。
+#    在 `set -u` 下（CLI 就设了）未定义变量不是警告，是**整个进程退出**。于是这工具
+#    一旦检测到外部切号就当场死掉——而那条路径存在的全部意义正是「发现别人改了账号」。
+#    没有任何判据变绿说谎，只是压根没有用例走到那个分支：走到它需要状态文件与配置文件
+#    互相矛盾。现在覆盖它的用例是「账号守卫：漂移日志间隔未定义时不得杀死进程」。
+QUOTA_ACCOUNT_DRIFT_LOG_INTERVAL="${QUOTA_ACCOUNT_DRIFT_LOG_INTERVAL:-300}"
+
 # ── Cross-account quota snapshot / 账号额度快照 ─────────────────────────
 # (produced by `account-probe --snapshot`; this script only reads it)
 #

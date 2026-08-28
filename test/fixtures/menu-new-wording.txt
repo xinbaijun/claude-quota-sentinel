@@ -1,0 +1,12 @@
+● 我继续跑下一步。
+
+  ⎿  Running tests…
+
+  You've hit your session limit · resets 3:10pm (Asia/Shanghai)
+
+  What do you want to do?
+  ❯ 1. Stop and wait for limit to reset
+    2. Upgrade your plan
+    3. Upgrade to Team plan
+
+  Enter to confirm · Esc to cancel
