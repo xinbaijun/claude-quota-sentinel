@@ -115,13 +115,77 @@ quota_switch_pick() {
 #    原来是 `--use "$to"`,于是每一次自动切号都把账号地址放上命令行,切号期间宿主上任何
 #    进程都能用 `pgrep -af` 读到。人工路径上那是操作者自己的选择;这里没有人做选择。
 #    ⚠️ token 从来不在这里、也不可能在:本函数根本不读凭据。改的是**地址**。
+#
+# 🔴 An exit code of 0 is not evidence that the account changed, and the identity fence
+#    has to move with it. Both halves are load-bearing:
+#    ① Read the identity back. A restored backup, or another writer of the shared
+#      config landing between the write and now, both produce "the tool succeeded and
+#      the account is still the old one". Claiming that as a switch moves the fence
+#      onto an account nobody is actually on.
+#    ② Move `account_guard.expected_*` to the new account. This looks like bookkeeping
+#      and is not: the guard treats `expected` as a persistent expectation and re-reads
+#      it at every decision boundary. A switch that succeeds while `expected` stays on
+#      the old account makes the very next guard call see actual != expected, report
+#      `account-drift`, fail closed — **and never recover**, because nothing else ever
+#      updates `expected`. It also writes an `external` ledger line, blaming an outside
+#      writer for something this tool did. That is the shape of the three-hour outage
+#      on 2026-08-12: the switch itself worked; what broke was every reading after it.
+#    ③ If the fence cannot be persisted, do NOT claim success. A claimed switch with an
+#      unmoved fence is exactly case ②.
+# 🔴 退出码 0 不是「账号真的换了」的证据，而且身份 fence 必须跟着挪。两半都承重：
+#    ① 回读身份。备份恢复、或共享配置的另一个 writer 恰好落在写入与此刻之间，都会造出
+#      「工具成功了、账号还是旧的」。把它当成切号成功，会把 fence 挪到一个根本没人在的账号上。
+#    ② 把 account_guard.expected_* 挪到新账号。这看着像记账，其实不是：守卫把 expected
+#      当持久期望值，每个决策边界都重读。切号成功而 expected 停在旧账号 ⇒ 下一次守卫就
+#      看到 actual≠expected，判 account-drift、fail closed，**而且再也不会自己好**，
+#      因为没有别的东西会更新 expected；它还会往流水账写一条 external，把本工具自己干的
+#      事记到一个外部 writer 头上。那正是 2026-08-12 停摆三小时的形状：切号本身成功了，
+#      坏掉的是它之后的每一次读数。
+#    ③ fence 落不了盘就**不要**宣称成功——宣称了就等于②。
 quota_switch_perform() {
-  local to="$1" out rc
+  local to="$1" now="${2:-$(date +%s)}" out rc
+  local before_raw="" before_email="" before_uuid="" before_usage=""
+  local after_raw="" now_email="" now_uuid="" now_usage=""
   [[ -x "$QUOTA_ACCOUNT_SWITCH_BIN" ]] || {
     quota_log "❌ account-switch not executable at $QUOTA_ACCOUNT_SWITCH_BIN"; return 1; }
+  before_raw=$(quota_identity_read 2>/dev/null || true)
+  [[ -n "$before_raw" ]] && IFS=$'\037' read -r before_email before_uuid before_usage <<< "$before_raw"
   out=$(printf '%s\n' "$to" | "$QUOTA_ACCOUNT_SWITCH_BIN" --use - --yes 2>&1); rc=$?
   if (( rc != 0 )); then
     quota_log "❌ switch to ${to} failed (rc=${rc}): $(printf '%s' "$out" | tail -1)"
+    return 1
+  fi
+
+  after_raw=$(quota_identity_read 2>/dev/null || true)
+  [[ -n "$after_raw" ]] && IFS=$'\037' read -r now_email now_uuid now_usage <<< "$after_raw"
+  if [[ "$now_email" != "$to" || -z "$now_uuid" ]]; then
+    quota_log "❌ identity after the switch is incomplete or wrong: now [${now_email:-unreadable}], expected [$to] -> failing closed"
+    return 1
+  fi
+  # ⚠️ The usage cache is deliberately NOT part of this check. It only refreshes when
+  #    the panel runs, so right after a switch it is normally empty or still on the old
+  #    account. Treating it as identity is what deadlocked upstream for three hours:
+  #    the guard wanted it consistent, it needed a panel read to refresh, and the panel
+  #    read needed the guard to pass.
+  # ⚠️ usage 缓存**刻意**不参与这条校验：它只在面板跑过之后才刷新，所以切号刚完成时为空
+  #    或还停在旧账号是正常的。把它当身份正是上游死锁三小时的原因。
+  if [[ -n "$now_usage" && "$now_uuid" != "$now_usage" ]]; then
+    quota_log "ℹ️ the usage cache still belongs to the previous account (normal lag); panel attribution is checked separately"
+  fi
+  if [[ -n "$before_email" && "$before_email" != "$to" \
+     && -n "$before_uuid" && "$before_uuid" == "$now_uuid" ]]; then
+    quota_log "❌ the config now claims ${to} but the account UUID did not change -> identity is not trustworthy"
+    return 1
+  fi
+
+  if ! quota_state_merge '
+      .account_guard.expected_email = $e
+      | .account_guard.expected_uuid = $u
+      | .account_guard.established_ts = $t
+      | .account_guard.last_ok_ts = $t
+      | .last_switch_ts = $t' \
+      --arg e "$to" --arg u "$now_uuid" --argjson t "$now"; then
+    quota_log "❌ the new identity was read back, but the guard fence could not be persisted -> not claiming success"
     return 1
   fi
   return 0
@@ -224,7 +288,7 @@ quota_decide_once() {
   fi
 
   quota_log "🔀 ${reason} -> switching ${current} -> ${target}"
-  if quota_switch_perform "$target"; then
+  if quota_switch_perform "$target" "$now"; then
     quota_account_switch_record "$now" "$current" "$target" "auto" "$reason"
     quota_state_merge '.last_switch_ts = $t | .account_guard.last_switch_recorded = $a' \
       --argjson t "$now" --arg a "$target" || true

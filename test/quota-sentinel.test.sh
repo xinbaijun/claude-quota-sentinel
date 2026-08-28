@@ -584,6 +584,56 @@ else
   fail "正控没红：这个检查抓不到「读了没定义」，上面那条绿是没有分辨力的绿"
 fi
 
+
+echo "── 靠全局变量回传结果的函数，不许被命令替换调用 ──"
+# ⭐ 上游用例 #100 守的是一个 bash 语言级陷阱，与那套环境毫无关系，所以搬过来：
+#    调用方写 `n=$(some_fn ...)` 时，命令替换在**子 shell** 里跑，函数里对全局变量的
+#    赋值传不回父 shell。上游那次的症状看着只是日志里一个 `?`，实际后果严重得多——
+#    计数恒为 0，于是「投递失败 → 需要人工介入」那条告警**永远不会触发**，真失败被报成
+#    「本轮跳过，无需人工」。注释里记着「本仓第 5 次踩」。
+# 🔴 本仓同样有一批靠全局回传的函数（QUOTA_GUARD_EMAIL / QUOTA_PANEL_LAST /
+#    QUOTA_LAST_ERROR / QUOTA_REFRESH_SEQ …），踩法一模一样。上游那条用例测的是某一个
+#    具体调用点；这里改成**结构判据**，覆盖全部调用点、也覆盖以后新写的：
+#    凡是会写这些全局的函数，都不许出现在 `$( )` 里面。
+_outparam_violations() {
+  local dir="$1" outs='QUOTA_GUARD_EMAIL|QUOTA_GUARD_UUID|QUOTA_LAST_ERROR|QUOTA_PANEL_LAST|QUOTA_PANEL_FRAME_LAST|QUOTA_PANEL_STATUS_LAST|QUOTA_REFRESH_SEQ'
+  local files fn setters=""
+  files=$(ls "$dir"/lib/*.sh "$dir"/quota-sentinel 2>/dev/null)
+  # 哪些函数会写这些全局：按「上一处函数定义」归属，awk 一趟扫完
+  setters=$(awk -v outs="$outs" '
+      /^[a-z_][a-z0-9_]*\(\)/ { fn=$0; sub(/\(\).*/,"",fn) }
+      fn != "" && $0 ~ ("(^|[^A-Za-z0-9_])(" outs ")=") { print fn }
+    ' $files | sort -u)
+  [[ -n "$setters" ]] || { echo "NO-SETTERS-FOUND"; return 0; }
+  for fn in $setters; do
+    grep -nE '\$\([^)]*\b'"$fn"'\b' $files | sed "s/^/${fn}: /"
+  done
+}
+_ops=$(_outparam_violations "$QS_SOURCE")
+if [[ -z "$_ops" ]]; then
+  pass "没有任何靠全局回传的函数被写在命令替换里"
+elif [[ "$_ops" == "NO-SETTERS-FOUND" ]]; then
+  fail "一个写这些全局的函数都没找到 —— 这个判据此刻什么也没在守"
+else
+  fail "这些调用在子 shell 里跑，全局回传会丢：$(printf '%s' "$_ops" | tr '\n' ' ')"
+fi
+# ⚠️ 正控：判据必须真的会红。造一份注入了违规调用的副本再扫一次。
+#    ⭐ 没有这一条，上面那个「零命中」与「扫描器根本没看这些文件」长得一模一样。
+mkdir -p "$TMP/cmdsub-pc/lib"
+cp "$QS_SOURCE"/lib/*.sh "$TMP/cmdsub-pc/lib/"
+cp "$QS_SOURCE/quota-sentinel" "$TMP/cmdsub-pc/"
+printf '%s\n' 'probe_value=$(quota_account_guard "injected-violation")' >> "$TMP/cmdsub-pc/lib/state.sh"
+# ⚠️ 先落到变量再判，**不要**写成 `_outparam_violations … | grep -q …`：本文件开着
+#    `pipefail`，而 `grep -q` 命中就立刻关掉管道，上游那些 grep 拿到 SIGPIPE 退非零，
+#    整条管道于是非零 —— **命中会被报成没找到**。这条正控第一次跑就栽在这里，
+#    表现成「注入了违规也扫不出来」，看着像判据本身没用。
+_ops_pc=$(_outparam_violations "$TMP/cmdsub-pc")
+if [[ "$_ops_pc" == *quota_account_guard* ]]; then
+  pass "正控：注入一处违规调用之后判据确实抓到了（它会红）"
+else
+  fail "正控没红：注入了违规调用也扫不出来，上面那条绿没有分辨力"
+fi
+
 echo "── 账号守卫：外部漂移分支不得因为一个未定义变量而杀死进程 ──"
 # The branch above is only reachable when the state file and the config file disagree
 # about which account is logged in, which is why no earlier test walked into it. This
@@ -2664,6 +2714,35 @@ fi
 : > "$QUOTA_SNAPSHOT_FILE"
 if quota_snapshot_read "$_SN_NOW" >/dev/null; then fail "空快照被接受"; else pass "空快照判定为不可用"; fi
 
+
+echo "── 对账日志只在内容变化时记，不逐行心跳 ──"
+# ⚠️ 上游这一组原本两半：巡扫频率闸（对全部会话逐个抓屏，未抽取 ⇒ 那半没有对象）
+#    与对账日志去重。搬过来的是后一半，它与那套环境无关。
+# ⚠️ 上游 2026-08-21 把决策拆成每 10s 一拍时，对账日志从每分钟一条变成每 10s 一条，
+#    08-22 起每天 2183 行。一份逐行心跳会把真正的变化埋掉，而对账要看的恰恰是变化。
+#    ⇒ 闸放在**函数内部**而不是调用点：以后谁调都受保护，不靠调用方记得。
+NZ="$TMP/noise"; mkdir -p "$NZ"
+QUOTA_STATE="$NZ/state.json"; QUOTA_LOG="$NZ/quota.log"
+QUOTA_SNAPSHOT_FILE="$NZ/snap.json"
+_NZ_NOW=1787320000
+printf '%s\n' '{"account":"cur@x","accounts":{"o@x":{"five":9,"week":9}}}' > "$QUOTA_STATE"
+_nz_snap() { printf '{"generated_at":%s,"accounts":[{"email":"o@x","status":"active","is_current":false,"five_hour":%s,"seven_day":9,"five_reset":null,"week_reset":null}]}' "$1" "$2" > "$QUOTA_SNAPSHOT_FILE"; }
+: > "$QUOTA_LOG"
+for _i in $(seq 0 11); do _nz_snap "$(( _NZ_NOW + _i * 10 ))" 20; quota_snapshot_shadow_compare "$(( _NZ_NOW + _i * 10 ))" >/dev/null 2>&1; done
+if [[ "$(grep -c '🔎' "$QUOTA_LOG")" == "1" ]]; then
+  pass "数值没变时 12 拍只记 1 条对账（不再逐行心跳）"
+else
+  fail "记了 $(grep -c '🔎' "$QUOTA_LOG") 条 —— 心跳会把真正的变化埋掉"
+fi
+# ⚠️ 正控：省日志不能变成漏掉变化。数值一变必须立刻记 —— 对账的全部意义就在变化上。
+_nz_snap "$(( _NZ_NOW + 200 ))" 55
+quota_snapshot_shadow_compare "$(( _NZ_NOW + 200 ))" >/dev/null 2>&1
+if [[ "$(grep -c '🔎' "$QUOTA_LOG")" == "2" ]]; then
+  pass "数值一变立刻记（去重没变成漏报）"
+else
+  fail "数值变了却没记 —— 去重把真信号也吃掉了"
+fi
+
 echo "── 快照现阶段只记账，不参与决策 ──"
 # ⚠️ 放行前必须先攒证据。已有的一致性证据（±60s 内差 ≤2 点、98% 成功率）**全部来自
 #    当前账号**的影子采样；查其他账号是另一条代码路径（不同 token、不同凭据文件），
@@ -2720,11 +2799,206 @@ fi
 cp "$_tmux_probe" "$TMUX_VIOLATIONS"
 }
 
+# ── the switch itself: verify, then fence / 切号本身：先回读，再挪 fence ──
+run_switch_tests() {
+
+echo "── 切号成功判据：账号必须真的变了，且身份 fence 必须跟着挪 ──"
+# ⚠️ 上游这一组测的是 quota_switch_to：切完**回读一次身份**，邮箱不符或 UUID 没变一律
+#    判失败，并且在确认成功之后把 account_guard 的 expected 身份挪到新账号。
+#    第三件事看着像记账，其实是功能性的：身份守卫拿 expected 当持久期望值，每个决策边界
+#    都重读。切号成功而 expected 还停在旧账号 ⇒ 下一拍守卫看到 actual≠expected，
+#    判 account-drift、fail closed，而且**再也不会自己好**（expected 永远不更新）。
+#    ⭐ 那正是 2026-08-12 13:00 那次停摆三小时的形状：切号本身成功了，卡死的是它之后的
+#    每一次读数。而且守卫还会往流水账写一条 external，把这台机器自己干的事记成外人干的。
+SW="$TMP/switch"; mkdir -p "$SW"
+QUOTA_STATE="$SW/state.json"; QUOTA_LOG="$SW/quota.log"; QUOTA_SWITCH_LEDGER="$SW/switches.jsonl"
+export QUOTA_CLAUDE_JSON="$SW/claude.json"
+SW_TOOL="$SW/fake-account-switch"
+_sw_setup() {   # $1=切号工具切完之后写进配置文件的邮箱 $2=uuid
+  cat > "$SW_TOOL" <<TOOL
+#!/bin/bash
+cat > "$QUOTA_CLAUDE_JSON" <<JSON
+{"oauthAccount":{"emailAddress":"$1","accountUuid":"$2"},
+ "cachedUsageUtilization":{"accountUuid":"$2"}}
+JSON
+exit 0
+TOOL
+  chmod +x "$SW_TOOL"
+  cat > "$QUOTA_CLAUDE_JSON" <<'JSON'
+{"oauthAccount":{"emailAddress":"cur@x","accountUuid":"uuid-cur"},
+ "cachedUsageUtilization":{"accountUuid":"uuid-cur"}}
+JSON
+  cat > "$QUOTA_STATE" <<JSON
+{"account":"cur@x","fetched_ts":$(date +%s),
+ "account_guard":{"expected_email":"cur@x","expected_uuid":"uuid-cur"},
+ "accounts":{"cur@x":{"five":95,"week":10},"free@x":{"five":5,"week":5}}}
+JSON
+  : > "$QUOTA_LOG"; : > "$QUOTA_SWITCH_LEDGER"
+}
+QUOTA_ACCOUNT_SWITCH_BIN="$SW_TOOL"
+QUOTA_SWITCH_MODE=on
+
+# ① 正常路径：切号工具真把账号换成了 free@x
+_sw_setup 'free@x' 'uuid-free'
+quota_decide_once "$(date +%s)" >/dev/null 2>&1
+_sw_kind=$(jq -r '.kind' "$QUOTA_SWITCH_LEDGER" 2>/dev/null | tail -1)
+_sw_exp=$(quota_state_get '.account_guard.expected_email' '')
+if [[ "$_sw_kind" == "auto" ]]; then
+  pass "切号成功记 auto 一条"
+else
+  fail "切号成功却没记 auto（kind=$_sw_kind）"
+fi
+if [[ "$_sw_exp" == "free@x" ]]; then
+  pass "身份 fence 跟着挪到新账号（expected_email=free@x）"
+else
+  fail "fence 还停在 [$_sw_exp]——下一拍守卫会判 account-drift，而且再也不会自己好"
+fi
+# ⭐ 直接把后果测出来，而不是只测那个字段：切完之后守卫必须照常放行。
+if quota_account_guard "post-switch" >/dev/null 2>&1; then
+  pass "切完之后守卫照常放行（切号没有把自己锁死）"
+else
+  fail "切号成功之后守卫立刻 fail closed：$(quota_state_get '.poll.last_error' '')"
+fi
+# ⭐ 而且不该把自己干的事记成外人干的。
+if ! grep -q '"external"' "$QUOTA_SWITCH_LEDGER"; then
+  pass "流水账里没有把本次自动切号误记成 external"
+else
+  fail "本工具自己切的号被记成了 external —— 读账本的人会去查一个不存在的外部 writer"
+fi
+
+# ② 切号工具返回 0，但账号**根本没换**（备份恢复、写入被并发盖回都会这样）
+_sw_setup 'cur@x' 'uuid-cur'
+quota_decide_once "$(date +%s)" >/dev/null 2>&1
+_sw_kind2=$(jq -r '.kind' "$QUOTA_SWITCH_LEDGER" 2>/dev/null | tail -1)
+if [[ "$_sw_kind2" != "auto" ]]; then
+  pass "正控：工具报成功但身份没变 → 不宣称切号成功（kind=$_sw_kind2）"
+else
+  fail "只看退出码就宣称切成了 —— 身份根本没变（这会让 fence 挪到一个假身份上）"
+fi
+
+# ③ 邮箱声称已换、UUID 却没变：身份不可信，必须 fail closed
+_sw_setup 'free@x' 'uuid-cur'
+quota_decide_once "$(date +%s)" >/dev/null 2>&1
+_sw_kind3=$(jq -r '.kind' "$QUOTA_SWITCH_LEDGER" 2>/dev/null | tail -1)
+if [[ "$_sw_kind3" != "auto" ]]; then
+  pass "正控：邮箱变了但 UUID 没变 → 判身份不可信，不宣称成功（kind=$_sw_kind3）"
+else
+  fail "邮箱对了就放行 —— 双 UUID 裂开的假身份会被当成切号成功"
+fi
+
+QUOTA_SWITCH_MODE=dry-run
+unset QUOTA_CLAUDE_JSON
+}
+
+# ── candidate ranking / 候选排序与筛选 ──
+run_candidate_tests() {
+CR_NOW=$(date +%s)
+QUOTA_STATE="$TMP/candidates.json"
+
+echo "── 候选排序：周额度剩得多的先用 ──"
+# 策略是「五小时窗口上串行、挑账号时贪心在周额度上」。五小时窗口几小时自己回来，周额度
+# 要等周重置，是稀缺的那一维；按它排序能让周额度被动趋于均衡，同时串行本身保证几个账号
+# 不会齐头并进同时撞顶。
+# ⚠️ 上游测的是 quota_try_switch 的**尝试顺序**（它会逐个试到成功为止）。本仓没有那条
+#    重试链——quota_switch_pick 只挑第一个可用的。⇒ 改成直接测排序函数的输出序列，
+#    那正是上游那条顺序断言真正在测的东西。
+cat > "$QUOTA_STATE" <<JSON
+{"account":"cur@x","accounts":{
+  "hi@x":{"five":10,"week":90},
+  "lo@x":{"five":10,"week":30},
+  "mid@x":{"five":10,"week":60},
+  "nodata@x":{"five":null,"week":null}}}
+JSON
+_order=$(quota_switch_ranked_candidates | cut -f1 | tr '\n' ' ')
+if [[ "$_order" == "lo@x mid@x hi@x " ]]; then
+  pass "按周额度升序：lo(30%) → mid(60%) → hi(90%)"
+else
+  fail "候选顺序错误（实际：${_order:-无}）"
+fi
+if [[ "$_order" != *"nodata@x"* ]]; then
+  pass "没有读数的账号不进候选（不是排最后，是压根不排——排它等于拿未知当 0%）"
+else
+  fail "把一个没有任何读数的账号排进了候选"
+fi
+# 正控：周额度相同时用五小时做次键，否则「按周排序」也可能只是碰巧顺序对。
+cat > "$QUOTA_STATE" <<'JSON'
+{"account":"cur@x","accounts":{
+  "b@x":{"five":80,"week":50},
+  "a@x":{"five":20,"week":50}}}
+JSON
+if [[ "$(quota_switch_ranked_candidates | cut -f1 | tr '\n' ' ')" == "a@x b@x " ]]; then
+  pass "正控：周额度打平时按五小时做次键（排序真的两键都用了）"
+else
+  fail "周额度打平时次键没生效"
+fi
+
+echo "── 候选筛选：坏的 reset 存值不得把可用账号挡在候选外 ──"
+# ⚠️ 上游 2026-08-12 12:04–12:08 实撞：某账号的 five_reset 是旧代码跨日回卷写下的
+#    9 小时后（五小时窗口不可能），于是被当成「已知满且尚未重置」跳过；候选为空 →
+#    三次触发全部直接判「全账号撞限」，而当前账号已经 100%。
+# 🔴 本仓这条缺陷**结构上不可能**：quota_switch_ranked_candidates 只看 five/week 两个
+#    百分比，根本不读 reset。这里把它钉成断言，而不是当成「已经修好了」——一旦以后有人
+#    往候选筛选里加 reset 判断，这条会立刻红，并把当年那次事故的理由摆在他面前。
+cat > "$QUOTA_STATE" <<JSON
+{"account":"cur@x","accounts":{
+  "badreset@x":{"five":10,"week":20,"five_reset":$(( CR_NOW + 32400 )),"week_reset":$(( CR_NOW + 200000 ))},
+  "sane@x":{"five":10,"week":30,"five_reset":$(( CR_NOW + 1800 )),"week_reset":$(( CR_NOW + 200000 ))}}}
+JSON
+if [[ "$(quota_switch_pick 'cur@x')" == "badreset@x" ]]; then
+  pass "reset 存值超出 5h 视界的账号仍进候选（候选筛选不消费 reset）"
+else
+  fail "坏 reset 把可用账号挡在候选外 —— 正是当年候选为空的原因"
+fi
+
+echo "── 退役账号必须彻底不占位置 ──"
+# ⚠️ 上游 2026-08-21 14:49–15:17 停摆 28 分钟的直接成因：当时只有一张暂停名单，而且
+#    **只在候选筛选处生效**；两个已死账号被正确跳过了候选，却仍算在「是不是全都满了」的
+#    分母里，而那段逻辑要求每个账号都有可用的重置时刻，这俩 28 小时没更新，于是永远凑不
+#    齐，于是只会打「台账不完整 → 不猜等待时间」然后干等，最后靠人手动切号解开。
+#    ⇒ 「跳过它」和「不把它算进分母」是两件事，做了前者不等于做了后者。
+# 🔴 本仓没有那个分母（全撞限与等待状态机未抽取），所以只剩前半件事可测。后半件事
+#    留在报告里，不在这里假装测过。
+cat > "$QUOTA_STATE" <<'JSON'
+{"account":"cur@x","accounts":{
+  "dead1@x":{"five":5,"week":5},
+  "dead2@x":{"five":6,"week":6},
+  "live@x":{"five":10,"week":40}}}
+JSON
+QUOTA_RETIRED_ACCOUNTS="dead1@x"; QUOTA_DISABLED_ACCOUNTS="dead2@x"
+_rt_order=$(quota_switch_ranked_candidates | cut -f1 | tr '\n' ' ')
+if [[ "$_rt_order" == "live@x " ]]; then
+  pass "退役与暂停的账号都不进候选，哪怕它们的数字最好看"
+else
+  fail "已退役/已暂停的账号仍在候选里：$_rt_order"
+fi
+# ⚠️ 正控（上游 P17 同一条）：把两个死账号从名单里拿掉，它们必须**重新**出现在候选里。
+#    否则上面那条可能只是因为别的原因排除了它们，断言没有区分度。
+QUOTA_RETIRED_ACCOUNTS=""; QUOTA_DISABLED_ACCOUNTS=""
+_rt_order2=$(quota_switch_ranked_candidates | cut -f1 | tr '\n' ' ')
+if [[ "$_rt_order2" == "dead1@x dead2@x live@x " ]]; then
+  pass "正控：从名单里拿掉之后它们确实重新进候选（上一条不是恒真）"
+else
+  fail "拿掉名单后顺序仍不含它们：$_rt_order2 —— 上一条断言没有区分度"
+fi
+# ⚠️ 两张名单必须各自独立生效：只留一张时另一张的账号必须回来。
+#    没有这一条，「把两张名单拼成一张」这种改法会全绿通过。
+QUOTA_RETIRED_ACCOUNTS="dead1@x"; QUOTA_DISABLED_ACCOUNTS=""
+_rt_only_retired=$(quota_switch_ranked_candidates | cut -f1 | tr '\n' ' ')
+QUOTA_RETIRED_ACCOUNTS=""; QUOTA_DISABLED_ACCOUNTS="dead2@x"
+_rt_only_paused=$(quota_switch_ranked_candidates | cut -f1 | tr '\n' ' ')
+if [[ "$_rt_only_retired" == "dead2@x live@x " && "$_rt_only_paused" == "dead1@x live@x " ]]; then
+  pass "退役名单与暂停名单各自独立生效（不是被拼成同一张）"
+else
+  fail "两张名单没有各自生效（retired-only=$_rt_only_retired paused-only=$_rt_only_paused）"
+fi
+QUOTA_RETIRED_ACCOUNTS=""; QUOTA_DISABLED_ACCOUNTS=""
+}
+
 case "$TEST_LAYER" in
   shadow) run_shadow_tests ;;
-  slow) run_decision_tests; run_slow_tests ;;
+  slow) run_decision_tests; run_switch_tests; run_candidate_tests; run_slow_tests ;;
   fast|all) run_extraction_tests; run_fast_tests; run_monitor_tests; run_cadence_tests; run_reading_round_tests
-            [[ "$TEST_LAYER" == all ]] && { run_shadow_tests; run_decision_tests; run_slow_tests; } ;;
+            [[ "$TEST_LAYER" == all ]] && { run_shadow_tests; run_decision_tests; run_switch_tests; run_candidate_tests; run_slow_tests; } ;;
   *) echo "layer $TEST_LAYER not populated yet" ;;
 esac
 run_isolation_check
