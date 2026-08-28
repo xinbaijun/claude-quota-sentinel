@@ -40,7 +40,24 @@ esac
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 FIX="$ROOT/test/fixtures"
-TMP=$(mktemp -d "${TMPDIR:-/tmp}/quota-sentinel-test.XXXXXX")
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/quota-sentinel-test.XXXXXX") || {
+  printf 'aborting: could not create a temporary directory under %s\n' "${TMPDIR:-/tmp}" >&2
+  exit 3; }
+# ⚠️ Check the value too, not just the exit status. An unchecked `mktemp` that fails
+#    leaves TMP empty, and every "$TMP/x" below then becomes "/x" — an absolute path in
+#    the filesystem root. The suite does not crash: it runs, writes its files there, and
+#    reports a plausible-looking `PASS 172  FAIL 15`. ⭐ The scaffolding failing is then
+#    indistinguishable from the code under test failing, which is the more expensive of
+#    the two ways to be wrong. (Measured 2026-08-28: 53 files created under `/`.)
+#    The `/*/*` shape rejects both "" and "/".
+# ⚠️ 不只看退出码，还要看值。没检查的 mktemp 失败之后 TMP 是空串，下面每个 "$TMP/x"
+#    都变成 "/x"——文件系统根目录下的绝对路径。套件不会崩，它照跑、把文件写在那里，
+#    然后报出一个看着很像回事的 `PASS 172  FAIL 15`。⭐ 于是**脚手架坏了**和**被测代码
+#    坏了**长得一模一样，而前者是两种错法里更贵的那一种。（2026-08-28 实测：`/` 下建了
+#    53 个文件。）`/*/*` 这个形状同时排除空串与 "/"。
+[[ -d "$TMP" && "$TMP" == /*/* ]] || {
+  printf 'aborting: TMP is not a usable directory (%s); refusing to run\n' "${TMP:-<empty>}" >&2
+  exit 3; }
 trap 'rm -rf "$TMP"' EXIT
 
 PASS=0; FAIL=0
@@ -565,7 +582,16 @@ _undefined_reads() {
     | grep -vxE 'HOME|PATH|TMPDIR|PWD|SHELL|TERM|LANG|LC_ALL|TZ|IFS|RANDOM|UID|EUID|HOSTNAME|SECONDS|LINENO|COLUMNS|LINES|OSTYPE|FUNCNAME|BASH_SOURCE|BASH_REMATCH|XDG_STATE_HOME|HTTPS_PROXY|HTTP_PROXY|NO_PROXY|ALL_PROXY|R|P' \
     || true
 }
-undef=$(_undefined_reads "$QS_SOURCE"/lib/*.sh "$QS_SOURCE/quota-sentinel")
+# ⚠️ `account-probe` belongs in this list: it is bash, it sets its own `set -uo pipefail`,
+#    and it is one of the two extracted CLIs — so it is exposed to exactly the defect this
+#    check exists to catch. Scanning it together with lib/*.sh currently yields nothing
+#    (it sources lib/config.sh), but a symbol read ONLY by it and defined nowhere would be
+#    structurally invisible without this. Coverage, not today's result, is the point.
+# ⚠️ `account-probe` 必须在这张单子里：它是 bash、自己设了 `set -uo pipefail`、
+#    是两个被抽取 CLI 中的一个 ⇒ 它正好暴露在这条判据要抓的那个缺陷面前。今天与
+#    lib/*.sh 合扫结果为空（它 source 了 lib/config.sh），但一个**只被它读、且哪儿都没定义**
+#    的符号，在没有这一项时对本判据结构上不可见。要紧的是覆盖面，不是今天的结果。
+undef=$(_undefined_reads "$QS_SOURCE"/lib/*.sh "$QS_SOURCE/quota-sentinel" "$QS_SOURCE/account-probe")
 if [[ -z "$undef" ]]; then
   pass "lib/*.sh 与 CLI 里没有「读了但谁都没定义」的配置变量"
 else
@@ -578,7 +604,7 @@ mkdir -p "$TMP/posctrl-lib"
 cp "$QS_SOURCE"/lib/*.sh "$TMP/posctrl-lib/"
 grep -v '^QUOTA_ACCOUNT_DRIFT_LOG_INTERVAL=' "$QS_SOURCE/lib/config.sh" > "$TMP/posctrl-lib/config.sh"
 undef_pc=$(_undefined_reads "$TMP/posctrl-lib"/*.sh)
-if printf '%s\n' "$undef_pc" | grep -qx 'QUOTA_ACCOUNT_DRIFT_LOG_INTERVAL'; then
+if grep -qx 'QUOTA_ACCOUNT_DRIFT_LOG_INTERVAL' <<<"$undef_pc"; then
   pass "正控：删掉那一行定义之后，同一个检查确实抓得到（判据会红）"
 else
   fail "正控没红：这个检查抓不到「读了没定义」，上面那条绿是没有分辨力的绿"
@@ -643,24 +669,65 @@ echo "── 判据里不许出现「管道末端是 grep -q」──"
 #    实测（抽取出来的同一份代码、空闲机器）：800 次调用错 61 次（7.6%）；连续 10 轮
 #    --fast 里 9 轮至少错一次。改法是把匹配写成 here-string：重定向不是管道，
 #    没有东西会 SIGPIPE，pipefail 也就无从传播。
+# _pipeline_grepq <files…> — 报出「在 pipefail 下、管道末端是 grep -q」的行。
+#
+# ⚠️ 判「在不在 pipefail 下」有一条明确规则，写出来免得靠猜：
+#   · **有 shebang** ⇒ 独立脚本，**只有它自己 set 了 pipefail 才算**在这个作用域里。
+#     （`tools/cleanroom-assert.sh` 正是这一格：它有同样的写法，但**没开 pipefail**，
+#       所以那行是安全的，不该被判红，也不该被顺手改掉。）
+#   · **没有 shebang** ⇒ 被 source 的库，pipefail 由 source 它的那个进程决定 ⇒ **一律算**。
+#     （`lib/*.sh` 自己都没 set，是 `quota-sentinel` 设的。）
+# ⚠️ 这条规则的**边界**：一个既有 shebang、又被别处 source 的文件会被判错。本仓没有这种
+#    文件；有了就要改这条规则，而不是给它开个例外。
+# ⚠️ The rule for "is this file under pipefail" is stated rather than guessed:
+#    a shebang means standalone (in scope only if it sets pipefail itself); no shebang
+#    means it is sourced, and inherits pipefail from whoever sources it (always in scope).
+#    Known limit: a file that has a shebang AND is also sourced elsewhere is misjudged.
+#    None exist here; if one appears, change the rule rather than granting it an exception.
 _pipeline_grepq() {
+  local f under=()
+  for f in "$@"; do
+    [[ -f "$f" ]] || continue
+    # 冻结件按**路径**排除：它是修复前的原文，在那里命中是对的，改它才是错。
+    # 按路径排除，不按「它注释里说自己是冻结件」排除。
+    [[ "$f" == */test/fixtures/legacy-detectors.sh ]] && continue
+    # （这一行原本写成 `head -c2 … | grep -qF`——扩作用域之后**判据抓到了它自己**。
+    #   那正是它该干的事：改成不用管道，而不是给自己开例外。）
+    if [[ "$(head -c2 "$f")" == '#!' ]]; then
+      grep -qE '^[[:space:]]*set[[:space:]]+-[a-zA-Z]*o?[[:space:]]+pipefail|^[[:space:]]*set[[:space:]]+-o[[:space:]]+pipefail' "$f" || continue
+    fi
+    under+=("$f")
+  done
+  (( ${#under[@]} )) || { echo "NO-FILES-IN-SCOPE"; return 0; }
   # 只挑「管道末端」的 grep -q：`| grep -q…`。here-string 与独立的 grep -q 不在此列。
   # ⚠️ 判据的**边界要说出来**：同一个 SIGPIPE 机制也适用于 `| head -n1`、`| grep -m1`
   #    这类会提前退出的末端。它们没被列进来，是因为本仓里那几处的**退出码没有被消费**
   #    （只取输出），列进来只会造出恒红。⇒ 这条判据答的是「grep -q 这一族」，
   #    不是「所有会 SIGPIPE 的管道」。写下来，免得后来者把沉默当成覆盖。
-  grep -nE '\|[[:space:]]*grep[[:space:]]+-[a-zA-Z]*q' "$@" 2>/dev/null | grep -v '^[^:]*:[0-9]*:[[:space:]]*#' || true
+  grep -nE '\|[[:space:]]*grep[[:space:]]+-[a-zA-Z]*q' "${under[@]}" 2>/dev/null \
+    | grep -v '^[^:]*:[0-9]*:[[:space:]]*#' || true
 }
-_pg=$(_pipeline_grepq "$QS_SOURCE"/lib/*.sh "$QS_SOURCE/quota-sentinel")
-if [[ -z "$_pg" ]]; then
-  pass "lib/*.sh 与 CLI 里没有「管道末端 grep -q」（pipefail + SIGPIPE 会把命中报成没命中）"
+_pg=$(_pipeline_grepq \
+        "$QS_SOURCE"/lib/*.sh "$QS_SOURCE/quota-sentinel" "$QS_SOURCE/account-probe" \
+        "$QS_SOURCE"/test/*.sh "$QS_SOURCE"/tools/*.sh)
+if [[ "$_pg" == "NO-FILES-IN-SCOPE" ]]; then
+  fail "作用域筛完一个文件都不剩 —— 这条判据此刻什么也没在守（规则或路径错了）"
+elif [[ -z "$_pg" ]]; then
+  pass "作用域内（lib/、CLI、account-probe、test/、tools/，按上面那条规则筛过）没有「管道末端 grep -q」"
 else
   fail "这些管道会把命中报成没命中：$(printf '%s' "$_pg" | tr '\n' ' ')"
 fi
 # 正控：往副本里注入一处，判据必须抓到。
 mkdir -p "$TMP/pipegrep-pc"
 cp "$QS_SOURCE"/lib/*.sh "$TMP/pipegrep-pc/"
-printf '%s\n' 'quota_posctrl_probe() { printf "%s\n" "$1" | grep -q needle; }' >> "$TMP/pipegrep-pc/detect.sh"
+# ⚠️ The violating line is assembled at run time from fragments, so that THIS file does
+#    not itself contain the pattern the check hunts for. Otherwise the check goes red on
+#    its own source — permanently — and a permanently red check trains people to walk
+#    past red. Do not "tidy" this back into one literal.
+# ⚠️ 违规那行是运行时拼出来的，好让**本文件自己**不含被查的那个形状。否则这条判据会在
+#    自己的源码上恒红，而恒红的判据会训练出「看到红也照过」。别把它「整理」回一整条字面量。
+_pg_bad='| grep'; _pg_bad="$_pg_bad -q needle"
+printf '%s\n' "quota_posctrl_probe() { printf '%s' \"\$1\" $_pg_bad; }" >> "$TMP/pipegrep-pc/detect.sh"
 _pg_pc=$(_pipeline_grepq "$TMP/pipegrep-pc"/*.sh)
 if [[ "$_pg_pc" == *"grep -q needle"* ]]; then
   pass "正控：注入一处管道末端 grep -q 之后判据确实抓到了（它会红）"
@@ -2456,14 +2523,16 @@ cat > "$QUOTA_STATE" <<'JSON'
              "week_remaining_cycles":6.7,"week_five_ratio":null,
              "week_five_ratio_measured":null}}
 JSON
-if out=$(quota_cmd_capacity 2>&1) && ! printf '%s' "$out" | grep -qi 'error'; then
+# ⚠️ here-string. 这一条的失效方向是**假绿**：`!` 会把管道的 141 变成真，
+#    于是输出里**确实有** error 时这条仍然打 PASS。
+if out=$(quota_cmd_capacity 2>&1) && ! grep -qi 'error' <<<"$out"; then
   pass "ratio=null 时 capacity 仍正常输出（不再 null*100 崩掉）"
 else
   fail "capacity 在 null 字段上报错：$(printf '%s' "$out" | grep -i error | head -1)"
 fi
 # ⚠️ 运行时输出在抽取时英文化过。断言跟着改文案，但**守的是同一件事**：
 #    降级时必须说出「不可用」，而不是打印一个 null 让读的人自己猜。
-if printf '%s' "$out" | grep -q 'ratio unavailable'; then
+if grep -q 'ratio unavailable' <<<"$out"; then
   pass "如实说明比值不可用，而不是打印一个 null"
 else
   fail "缺少可读的降级说明：$(printf '%s' "$out" | tail -3)"

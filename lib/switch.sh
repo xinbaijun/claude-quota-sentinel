@@ -132,6 +132,26 @@ quota_switch_pick() {
 #      on 2026-08-12: the switch itself worked; what broke was every reading after it.
 #    ③ If the fence cannot be persisted, do NOT claim success. A claimed switch with an
 #      unmoved fence is exactly case ②.
+#    ⚠️ REMAINING WINDOW — `return 1` closes the CLAIM, not the STATE. By the time
+#      `account-switch` has returned 0 the credentials are already changed and that is
+#      not undoable. If this process dies between the successful read-back and the fence
+#      write, reality is: account = new, `expected_*` = old, and the ledger has no line at
+#      all (the record is written by the caller, after this function returns). The next
+#      round then takes the account-drift branch and fails closed permanently, exactly as
+#      described above. This is still a strict improvement — before, EVERY successful
+#      switch ended that way; now only a crash inside a narrow window does — but it is not
+#      closed. Closing it needs an intent record written BEFORE the switch, which the
+#      guard consults before declaring drift. That is a later milestone, not a TODO to be
+#      quietly forgotten: it is written here because the sentence "we do not claim
+#      success" reads like the hole is gone, and it is not.
+#    ⚠️ 剩余窗口 —— `return 1` 关的是**声称**，不是**状态**。`account-switch` 返回 0 那一刻
+#      凭据已经换了、不可撤回。若进程在「回读成功」与「fence 落盘」之间死掉，现实是：
+#      账号=新、`expected_*`=旧、流水账**一行都没有**（记账在调用方、在本函数返回之后）。
+#      下一拍照样走 account-drift 分支、永久 fail closed，与上面描述的一模一样。
+#      这仍是严格改进——改之前是**每一次**成功切号都那样，现在只有崩在这个窄窗口里才那样
+#      ——但它**没有被关上**。真正收口需要在切号**之前**先落一条 intent，让守卫在判定漂移前
+#      先看它。那是后续里程碑的事；写在这里而不是悄悄留成 TODO，是因为
+#      「我们不宣称成功」这句话读起来像洞已经没了，而它还在。
 # 🔴 退出码 0 不是「账号真的换了」的证据，而且身份 fence 必须跟着挪。两半都承重：
 #    ① 回读身份。备份恢复、或共享配置的另一个 writer 恰好落在写入与此刻之间，都会造出
 #      「工具成功了、账号还是旧的」。把它当成切号成功，会把 fence 挪到一个根本没人在的账号上。

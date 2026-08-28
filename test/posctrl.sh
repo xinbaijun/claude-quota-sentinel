@@ -33,11 +33,30 @@
 
 set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-TMP=$(mktemp -d "${TMPDIR:-/tmp}/quota-sentinel-posctrl.XXXXXX")
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/quota-sentinel-posctrl.XXXXXX") || {
+  printf 'aborting: could not create a temporary directory under %s\n' "${TMPDIR:-/tmp}" >&2
+  exit 3; }
+# ⚠️ Check the value too, not just the exit status. An unchecked `mktemp` that fails
+#    leaves TMP empty, and every "$TMP/x" below then becomes "/x" — an absolute path in
+#    the filesystem root. The suite does not crash: it runs, writes its files there, and
+#    reports a plausible-looking `PASS 172  FAIL 15`. ⭐ The scaffolding failing is then
+#    indistinguishable from the code under test failing, which is the more expensive of
+#    the two ways to be wrong. (Measured 2026-08-28: 53 files created under `/`.)
+#    The `/*/*` shape rejects both "" and "/".
+# ⚠️ 不只看退出码，还要看值。没检查的 mktemp 失败之后 TMP 是空串，下面每个 "$TMP/x"
+#    都变成 "/x"——文件系统根目录下的绝对路径。套件不会崩，它照跑、把文件写在那里，
+#    然后报出一个看着很像回事的 `PASS 172  FAIL 15`。⭐ 于是**脚手架坏了**和**被测代码
+#    坏了**长得一模一样，而前者是两种错法里更贵的那一种。（2026-08-28 实测：`/` 下建了
+#    53 个文件。）`/*/*` 这个形状同时排除空串与 "/"。
+[[ -d "$TMP" && "$TMP" == /*/* ]] || {
+  printf 'aborting: TMP is not a usable directory (%s); refusing to run\n' "${TMP:-<empty>}" >&2
+  exit 3; }
 trap 'rm -rf "$TMP"' EXIT
 WANT=("$@")
 
 OK=0; BAD=0
+# 这些消融的正确表现是「中止」，额外要求输出里零 PASS/FAIL 计数行。
+MUST_ABORT="tmp-mktemp-failure tmp-value-unusable"
 declare -a ROWS=()
 
 # ablate <id> <guard being proved> <layer> <expected text in the FAIL line> <mutator...>
@@ -56,7 +75,24 @@ ablate() {
   local out rc
   out=$(cd "$C" && bash "$C/test/quota-sentinel.test.sh" "$layer" 2>&1); rc=$?
   local hit=""
-  if printf '%s' "$out" | grep -Fq -- "$expect"; then hit=1; fi
+  # ⚠️ here-string, never `printf … | grep -Fq`. This line ADJUDICATES whether each
+  #    ablation went red, and under `set -o pipefail` (set at the top of this file) the
+  #    very mechanism these ablations certify would corrupt the verdict: `grep -Fq` exits
+  #    on its first match, `printf` dies of SIGPIPE, the pipeline reports 141, and a
+  #    genuinely RED ablation gets recorded as MISS. Measured on this exact shape:
+  #    0–7.8% depending on machine load, worst when the expected FAIL line appears early.
+  # ⚠️ 用 here-string，绝不用 `printf … | grep -Fq`。**这一行是给每条消融判红没红的那一行**，
+  #    而本文件开着 pipefail ⇒ 这些消融要证明的那个机制，恰好会污染它自己的裁决：
+  #    真红的消融被记成 MISS。同一形状实测漏判 0–7.8%（随负载），命中越靠前越容易漏。
+  if grep -Fq -- "$expect" <<<"$out"; then hit=1; fi
+  # ⚠️ 有些消融的正确表现是「中止」而不是「某条断言变红」。对这些，光有退出码和关键字还不够
+  #    ——未加固时退出码本来就是非 0。额外要求：**一条 PASS/FAIL 都不许产生**。
+  case " $MUST_ABORT " in
+    *" $id "*)
+      if grep -qE '^  (PASS|FAIL) |^PASS [0-9]+ ' <<<"$out"; then
+        hit=""; printf '        (%s 要求「中止且零断言」，但输出里出现了断言计数行)\n' "$id"
+      fi ;;
+  esac
   if (( rc != 0 )) && [[ -n "$hit" ]]; then
     printf 'RED   %-22s %s\n' "$id" "$guard"
     ROWS+=("$id|$guard|RED (rc=$rc)")
@@ -117,10 +153,11 @@ REFREEZE
 # m_frozen <from> <to> — edit the frozen control group AND update its declared hash,
 # so the run gets past the integrity guard and reaches the detector assertion.
 m_frozen(){ m_sed test/fixtures/legacy-detectors.sh "$1" "$2" && m_refreeze; }
-# m_switch_noreadback — take out BOTH post-switch identity checks. Removing only one
-# leaves the other still catching the case, and the ablation would come out green while
-# the guard it is meant to prove is half gone. "Ablate the guard" means the whole guard.
-# m_switch_noreadback —— 把切号后的**两条**身份校验一起拿掉。只拿掉一条时另一条仍抓得住，
+# m_tmp_badparent / m_tmp_badvalue — 只弄坏「取得临时目录」这一步，**保留那两道闸**。
+# ⭐ 第一版我把闸整个拆了，于是副本照跑、把文件写进 `/`，而消融被判 MISS ——
+#   拆掉守卫得到的是「没有守卫时的样子」，不是「守卫会不会响」。消融要动的是**触发条件**，
+#   不是守卫本身。（那一版实测又在 `/` 下留了 54 项，已逐项清掉；见交付报告。）
+# m_switch_noreadback — 把切号后的**两条**身份校验一起拿掉。只拿掉一条时另一条仍抓得住，
 # 消融会绿，而它要证明的那道守卫其实已经少了一半。「消融这道守卫」指的是整道。
 m_switch_noreadback(){
   m_sed lib/switch.sh \
@@ -129,6 +166,17 @@ m_switch_noreadback(){
   m_sed lib/switch.sh \
     'if [[ -n "$before_email" && "$before_email" != "$to"' \
     'if false && [[ -n "$before_email" && "$before_email" != "$to"' || return 1
+}
+
+m_tmp_badparent(){   # mktemp 失败 ⇒ 第一道闸（退出码）响
+  m_sed test/quota-sentinel.test.sh \
+    'TMP=$(mktemp -d "${TMPDIR:-/tmp}/quota-sentinel-test.XXXXXX")' \
+    'TMP=$(mktemp -d "/nonexistent-parent-dir/quota-sentinel-test.XXXXXX" 2>/dev/null)'
+}
+m_tmp_badvalue(){    # mktemp「成功」但给出不可用的值 ⇒ 第二道闸（值）响
+  m_sed test/quota-sentinel.test.sh \
+    'TMP=$(mktemp -d "${TMPDIR:-/tmp}/quota-sentinel-test.XXXXXX")' \
+    'TMP=$(printf /)'
 }
 
 # ══ 1. the frozen control group / 冻结对照组 ══════════════════════════════
@@ -232,6 +280,19 @@ ablate switch-line-not-enforced \
     '>= QUOTA_SWITCH_PCT_FIVE )) && continue' \
     '>= 100000 )) && continue'
 
+# ══ 9b. temp-directory acquisition / 临时目录取得 ═══════════════════════
+# ⚠️ 这两条的期望值刻意不只是「退出码非 0」——未加固时退出码本来就是 1（15 条断言失败）。
+#    要求的是**中止且一条 PASS/FAIL 都不产生**（见 MUST_ABORT）。
+ablate tmp-mktemp-failure \
+  "mktemp 失败时必须中止（第一道闸：退出码）" --fast \
+  "could not create a temporary directory" \
+  m_tmp_badparent
+
+ablate tmp-value-unusable \
+  "mktemp 给出不可用的值时必须中止（第二道闸：值）——否则文件会写进文件系统根目录" --fast \
+  "refusing to run" \
+  m_tmp_badvalue
+
 # ══ 10b. the pipefail/SIGPIPE shape / pipefail 与 SIGPIPE ═══════════════
 # 把一处匹配改回 `printf | grep -q` 的写法：结构判据必须抓到它。
 # ⚠️ 这里刻意只验**结构判据**会红，不验那条 200 次行为判据——后者是统计判据，
@@ -242,7 +303,7 @@ ablate pipeline-grepq \
   "这些管道会把命中报成没命中" \
   m_sed lib/detect.sh \
     'grep -qE "$QUOTA_MENU_OPT1_REGEX" <<<"$t20" || return 1' \
-    'printf "%s\\n" "$t20" | grep -qE "$QUOTA_MENU_OPT1_REGEX" || return 1'
+    "printf '%s' \"\$t20\" $(printf '%s' '| grep') -qE \"\$QUOTA_MENU_OPT1_REGEX\" || return 1"
 
 # ══ 11. reading-side gates / 读数侧的闸 ══════════════════════════════════
 ablate compare-log-heartbeat \
