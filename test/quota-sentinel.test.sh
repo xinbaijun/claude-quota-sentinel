@@ -634,6 +634,67 @@ else
   fail "正控没红：注入了违规调用也扫不出来，上面那条绿没有分辨力"
 fi
 
+
+echo "── 判据里不许出现「管道末端是 grep -q」──"
+# 🔴 本仓在 `set -o pipefail` 下运行，而 `grep -q` 一命中就退出；上游还在往一根已关闭的
+#    管道里写，于是被 SIGPIPE 打死，**整条管道回报 141，尽管模式明明命中了**。调用方读到
+#    的是「没匹配」。⭐ 后果不是「偶尔慢一点」：一个屏上明明有选单的判据会间歇性地报
+#    「没有选单」——与当年「文案改了就哑掉 28 天」同一种后果，只是这次看起来像负载抖动。
+#    实测（抽取出来的同一份代码、空闲机器）：800 次调用错 61 次（7.6%）；连续 10 轮
+#    --fast 里 9 轮至少错一次。改法是把匹配写成 here-string：重定向不是管道，
+#    没有东西会 SIGPIPE，pipefail 也就无从传播。
+_pipeline_grepq() {
+  # 只挑「管道末端」的 grep -q：`| grep -q…`。here-string 与独立的 grep -q 不在此列。
+  # ⚠️ 判据的**边界要说出来**：同一个 SIGPIPE 机制也适用于 `| head -n1`、`| grep -m1`
+  #    这类会提前退出的末端。它们没被列进来，是因为本仓里那几处的**退出码没有被消费**
+  #    （只取输出），列进来只会造出恒红。⇒ 这条判据答的是「grep -q 这一族」，
+  #    不是「所有会 SIGPIPE 的管道」。写下来，免得后来者把沉默当成覆盖。
+  grep -nE '\|[[:space:]]*grep[[:space:]]+-[a-zA-Z]*q' "$@" 2>/dev/null | grep -v '^[^:]*:[0-9]*:[[:space:]]*#' || true
+}
+_pg=$(_pipeline_grepq "$QS_SOURCE"/lib/*.sh "$QS_SOURCE/quota-sentinel")
+if [[ -z "$_pg" ]]; then
+  pass "lib/*.sh 与 CLI 里没有「管道末端 grep -q」（pipefail + SIGPIPE 会把命中报成没命中）"
+else
+  fail "这些管道会把命中报成没命中：$(printf '%s' "$_pg" | tr '\n' ' ')"
+fi
+# 正控：往副本里注入一处，判据必须抓到。
+mkdir -p "$TMP/pipegrep-pc"
+cp "$QS_SOURCE"/lib/*.sh "$TMP/pipegrep-pc/"
+printf '%s\n' 'quota_posctrl_probe() { printf "%s\n" "$1" | grep -q needle; }' >> "$TMP/pipegrep-pc/detect.sh"
+_pg_pc=$(_pipeline_grepq "$TMP/pipegrep-pc"/*.sh)
+if [[ "$_pg_pc" == *"grep -q needle"* ]]; then
+  pass "正控：注入一处管道末端 grep -q 之后判据确实抓到了（它会红）"
+else
+  fail "正控没红：注入了也扫不出来，上面那条绿没有分辨力"
+fi
+
+echo "── 同一帧反复喂给判据，结果必须每次一样 ──"
+# 上面那条是结构判据；这条是行为判据。两条守的是同一件事，但**答的是不同的问题**：
+# 结构判据答「代码里还有没有这种写法」，行为判据答「此刻这个判据稳不稳」。
+# 只留结构判据的话，任何**别的**来源的不确定性都不会被发现。
+# ⚠️ 200 次是按实测的 7.6% 错误率定的：真回归到旧写法时漏掉的概率约 1e-7。
+_menu_frame=$(read_fx menu-new-wording.txt)
+_stable_bad=0
+for _i in $(seq 1 200); do
+  quota_menu_present "$_menu_frame" || _stable_bad=$((_stable_bad+1))
+done
+if (( _stable_bad == 0 )); then
+  pass "同一帧连喂 200 次，选单判据 200 次都认得出（没有间歇性漏判）"
+else
+  fail "200 次里有 $_stable_bad 次没认出同一帧 —— 判据不稳定，绿也不能当数"
+fi
+# 正控：换一帧**不该命中**的，必须 200 次都不命中；否则上面那条用「恒真」实现也全绿。
+_nomenu_frame=$(read_fx menu-in-scrollback.txt)
+_stable_false=0
+for _i in $(seq 1 200); do
+  quota_menu_present "$_nomenu_frame" && _stable_false=$((_stable_false+1))
+done
+if (( _stable_false == 0 )); then
+  pass "正控：不该命中的那帧连喂 200 次也 200 次都不命中（上一条不是恒真）"
+else
+  fail "不该命中的帧有 $_stable_false 次命中了"
+fi
+
 echo "── 账号守卫：外部漂移分支不得因为一个未定义变量而杀死进程 ──"
 # The branch above is only reachable when the state file and the config file disagree
 # about which account is logged in, which is why no earlier test walked into it. This
@@ -2817,6 +2878,13 @@ SW_TOOL="$SW/fake-account-switch"
 _sw_setup() {   # $1=切号工具切完之后写进配置文件的邮箱 $2=uuid
   cat > "$SW_TOOL" <<TOOL
 #!/bin/bash
+# ⚠️ Drain stdin first, exactly like the real tool does with \`--use -\`.
+#    A fake that exits without reading leaves the caller's \`printf\` writing into a
+#    closed pipe: SIGPIPE, and under \`set -o pipefail\` the caller sees rc=141 instead
+#    of 0 — so a switch that succeeded is reported as failed, intermittently, depending
+#    on scheduling. That is the same SIGPIPE-under-pipefail shape this suite guards for
+#    in the detectors; here it was the **test harness** producing it.
+cat >/dev/null
 cat > "$QUOTA_CLAUDE_JSON" <<JSON
 {"oauthAccount":{"emailAddress":"$1","accountUuid":"$2"},
  "cachedUsageUtilization":{"accountUuid":"$2"}}

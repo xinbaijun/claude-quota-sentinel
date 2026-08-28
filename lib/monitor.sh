@@ -71,8 +71,9 @@ quota_monitor_ready() {
   quota_monitor_shell_ready && return 1
   # 只看当前可见屏，不把上一代 cc 留在 tmux history 里的旧 composer 当成新进程已就绪。
   t=$(tmux capture-pane -t "$QUOTA_MONITOR_SESSION" -p 2>/dev/null) || return 1
-  printf '%s\n' "$t" | grep -q 'Is this a project you created or one you trust' && return 1
-  printf '%s\n' "$t" | tail -12 | grep -qE "$QUOTA_COMPOSER_REGEX"
+  grep -q 'Is this a project you created or one you trust' <<<"$t" && return 1
+  local t12; t12=$(printf '%s\n' "$t" | tail -12)
+  grep -qE "$QUOTA_COMPOSER_REGEX" <<<"$t12"
 }
 
 quota_monitor_wait_ready() {
@@ -83,7 +84,7 @@ quota_monitor_wait_ready() {
   for (( i=0; i<=attempts; i++ )); do
     t=$(tmux capture-pane -t "$QUOTA_MONITOR_SESSION" -p 2>/dev/null || true)
     # 首次进新目录 cc 会弹信任框；只在确认是信任框时才回车，不盲拍。
-    if printf '%s\n' "$t" | grep -q 'Is this a project you created or one you trust'; then
+    if grep -q 'Is this a project you created or one you trust' <<<"$t"; then
       tmux send-keys -t "$QUOTA_MONITOR_SESSION" Enter 2>/dev/null
     elif ! quota_monitor_shell_ready \
          && { quota_monitor_panel_open || quota_monitor_ready; }; then
@@ -186,7 +187,7 @@ quota_monitor_exit_to_shell() {
   for i in 1 2 3 4 5 6 7 8; do
     sleep 0.5
     frame=$(tmux capture-pane -t "$QUOTA_MONITOR_SESSION" -p 2>/dev/null || true)
-    if printf '%s\n' "$frame" | grep -qE '❯.*\/exit'; then typed=1; break; fi
+    if grep -qE '❯.*\/exit' <<<"$frame"; then typed=1; break; fi
   done
   if (( ! typed )); then
     tmux send-keys -t "$QUOTA_MONITOR_SESSION" C-u 2>/dev/null || true
@@ -413,13 +414,13 @@ quota_panel_field() {
 # 错误页仍会带上一帧百分比；若先 parse，429/last-known 会被误当成新鲜额度。
 quota_panel_frame_status() {
   local frame="$1"
-  if printf '%s\n' "$frame" | grep -qiE 'Refreshing([.]{3}|…)?'; then
+  if grep -qiE 'Refreshing([.]{3}|…)?' <<<"$frame"; then
     printf 'refreshing\n'; return 0
   fi
-  if printf '%s\n' "$frame" | grep -qiE 'rate[ -]?limit(ed| reached)?|too many requests|HTTP[[:space:]]*429|\b429\b'; then
+  if grep -qiE 'rate[ -]?limit(ed| reached)?|too many requests|HTTP[[:space:]]*429|\b429\b' <<<"$frame"; then
     printf 'rate_limited\n'; return 0
   fi
-  if printf '%s\n' "$frame" | grep -qiE 'last[ -]?known usage|showing (cached|previous) usage'; then
+  if grep -qiE 'last[ -]?known usage|showing (cached|previous) usage' <<<"$frame"; then
     printf 'last_known\n'; return 0
   fi
   # ⚠️ 只在**额度块所属区域**内认这些错误文案。
@@ -432,11 +433,11 @@ quota_panel_frame_status() {
   local _above
   _above=$(printf '%s\n' "$frame" | sed -n "1,/What's contributing to your limits usage/p")
   [[ -n "$_above" ]] || _above="$frame"
-  if printf '%s\n' "$_above" | grep -qiE 'could not refresh( usage( data)?)?|failed to (load|refresh).*usage|unable to (load|refresh).*usage|usage data unavailable'; then
+  if grep -qiE 'could not refresh( usage( data)?)?|failed to (load|refresh).*usage|unable to (load|refresh).*usage|usage data unavailable' <<<"$_above"; then
     printf 'refresh_failed\n'; return 0
   fi
-  if printf '%s\n' "$frame" | grep -qE '^[[:space:]]*Current session[[:space:]]*$' \
-     && printf '%s\n' "$frame" | grep -qE '^[[:space:]]*Current week \(all models\)[[:space:]]*$'; then
+  if grep -qE '^[[:space:]]*Current session[[:space:]]*$' <<<"$frame" \
+     && grep -qE '^[[:space:]]*Current week \(all models\)[[:space:]]*$' <<<"$frame"; then
     if quota_panel_parse "$frame" >/dev/null 2>&1; then
       printf 'clean\n'
     else
@@ -447,9 +448,9 @@ quota_panel_frame_status() {
   # 常驻后 cc 会继续渲染本机 usage 归因，额度区块可能被滚出当前 viewport；顶部 tab chrome
   # 仍在且没有 composer，说明面板没有关闭。这里仅标为 panel_detail（可留原始日志但无数值
   # 可决策），避免 quota_monitor_observe 把它当 closed 而绕过 next_due 提前重开一次网络请求。
-  if printf '%s\n' "$frame" | grep -qE \
-       '^[[:space:]]*Settings[[:space:]]+Status[[:space:]]+Config[[:space:]]+Usage[[:space:]]+Stats[[:space:]]*$' \
-     && ! printf '%s\n' "$frame" | grep -qE "$(quota_idle_cursor_regex)"; then
+  if grep -qE \
+       '^[[:space:]]*Settings[[:space:]]+Status[[:space:]]+Config[[:space:]]+Usage[[:space:]]+Stats[[:space:]]*$' <<<"$frame" \
+     && ! grep -qE "$(quota_idle_cursor_regex)" <<<"$frame"; then
     printf 'panel_detail\n'
     return 0
   fi
@@ -701,15 +702,15 @@ quota_monitor_prepare_owner() {
 # composer 中选中 `/usage`，并在真正回车前持久化本次网络 attempt。
 quota_monitor_open_usage() {
   local acct="$1" uuid="$2" generation="$3" launch_id="$4" mode="$5"
-  local i typed=0 opened=0 now
+  local i typed=0 opened=0 now _uframe
   quota_monitor_ready || return 1
   tmux send-keys -t "$QUOTA_MONITOR_SESSION" C-u 2>/dev/null
   sleep 0.3
   tmux send-keys -t "$QUOTA_MONITOR_SESSION" -l '/usage' 2>/dev/null || return 1
   for i in 1 2 3 4 5 6 7 8; do
     sleep 0.5
-    if tmux capture-pane -t "$QUOTA_MONITOR_SESSION" -p 2>/dev/null \
-       | grep -qE '❯.*\/usage'; then typed=1; break; fi
+    _uframe=$(tmux capture-pane -t "$QUOTA_MONITOR_SESSION" -p 2>/dev/null || true)
+    if grep -qE '❯.*\/usage' <<<"$_uframe"; then typed=1; break; fi
   done
   (( typed )) || return 1
   sleep 0.5

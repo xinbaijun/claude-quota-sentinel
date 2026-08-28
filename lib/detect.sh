@@ -16,13 +16,35 @@
 #   ② 末 8 行有 footer（活选单的 footer 是 pane 最底 chrome；scrollback 死文本的 footer 会被顶出窗）
 #   ③ 末 20 行有「Stop and wait for limit to reset」——描述行为，跨版本稳定
 #   ④ 末 20 行至少有 2 个编号项——**不看文案**，因为选项 2/3 是商品名会变
+# ⚠️ Every match below is a here-string, never `printf ... | grep -q`.
+#    🔴 That is not style. This file runs under `set -o pipefail`, and `grep -q` exits
+#    the moment it matches — which leaves the producer writing into a closed pipe, so
+#    the producer dies of SIGPIPE and the PIPELINE reports 141 **even though the pattern
+#    matched**. The caller then reads "no match". Measured on the extracted copy of the
+#    original code: 61 misses in 800 calls (7.6%) on an idle machine, and at least one
+#    miss in 9 of 10 consecutive regression runs.
+#    ⭐ The symptom is a detector that intermittently reports "no menu" while a menu is
+#    on screen — which is the same failure the wording-anchored detector had, arriving
+#    by a different route, and it looks like load-related flakiness rather than a bug.
+#    A here-string is a redirection, not a pipeline: nothing can SIGPIPE, and pipefail
+#    has nothing to propagate.
+# ⚠️ 下面每一处匹配都用 here-string，绝不用 `printf … | grep -q`。
+#    🔴 这不是风格问题。本文件在 `set -o pipefail` 下运行，而 `grep -q` 一命中就退出，
+#    上游还在往一根已关闭的管道里写 ⇒ 上游被 SIGPIPE 打死，**整条管道回报 141，尽管
+#    模式明明命中了**。调用方读到的是「没匹配」。在抽取出来的同一份代码上实测：
+#    800 次里错 61 次（7.6%），连续 10 轮回归里 9 轮至少错一次。
+#    ⭐ 症状是判据间歇性地在「屏上有选单」时报「没有选单」——与当年那次「文案改了就哑掉」
+#    是同一种后果、走的另一条路，而且看起来像负载抖动，不像缺陷。
+#    here-string 是重定向不是管道：没有东西会 SIGPIPE，pipefail 也就无从传播。
 quota_menu_present() {
-  local t="$1" t20 n
-  printf '%s\n' "$t" | tail -10 | grep -qE "$(quota_idle_cursor_regex)" && return 1
-  printf '%s\n' "$t" | tail -8 | grep -qE "$QUOTA_MENU_FOOTER_REGEX" || return 1
+  local t="$1" t10 t8 t20 n
+  t10=$(printf '%s\n' "$t" | tail -10)
+  grep -qE "$(quota_idle_cursor_regex)" <<<"$t10" && return 1
+  t8=$(printf '%s\n' "$t" | tail -8)
+  grep -qE "$QUOTA_MENU_FOOTER_REGEX" <<<"$t8" || return 1
   t20=$(printf '%s\n' "$t" | tail -20)
-  printf '%s\n' "$t20" | grep -qE "$QUOTA_MENU_OPT1_REGEX" || return 1
-  n=$(printf '%s\n' "$t20" | grep -cE "$QUOTA_MENU_NUMBERED_REGEX")
+  grep -qE "$QUOTA_MENU_OPT1_REGEX" <<<"$t20" || return 1
+  n=$(grep -cE "$QUOTA_MENU_NUMBERED_REGEX" <<<"$t20")
   (( n >= 2 ))
 }
 

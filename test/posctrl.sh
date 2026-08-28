@@ -232,6 +232,18 @@ ablate switch-line-not-enforced \
     '>= QUOTA_SWITCH_PCT_FIVE )) && continue' \
     '>= 100000 )) && continue'
 
+# ══ 10b. the pipefail/SIGPIPE shape / pipefail 与 SIGPIPE ═══════════════
+# 把一处匹配改回 `printf | grep -q` 的写法：结构判据必须抓到它。
+# ⚠️ 这里刻意只验**结构判据**会红，不验那条 200 次行为判据——后者是统计判据，
+#    在一次消融里恰好 200 次全对的概率不是 0（按实测 7.6% 约 1e-7，但那是概率不是保证）。
+#    ⭐ 用一条概率判据去证明另一条判据「会红」，等于把一个可判定的问题换成一个赌注。
+ablate pipeline-grepq \
+  "判据里不许出现管道末端的 grep -q（pipefail 会把命中报成没命中）" --fast \
+  "这些管道会把命中报成没命中" \
+  m_sed lib/detect.sh \
+    'grep -qE "$QUOTA_MENU_OPT1_REGEX" <<<"$t20" || return 1' \
+    'printf "%s\\n" "$t20" | grep -qE "$QUOTA_MENU_OPT1_REGEX" || return 1'
+
 # ══ 11. reading-side gates / 读数侧的闸 ══════════════════════════════════
 ablate compare-log-heartbeat \
   "对账日志只在内容变化时记，不逐行心跳" --slow \
