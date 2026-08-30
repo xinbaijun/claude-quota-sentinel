@@ -110,10 +110,15 @@ able to decide whether to trust it before you read anything else.
 ⚠️ **That table is the set you should decide about, not the complete file listing.** The
 locks, the shadow-sampling state and event files, the cross-account snapshot and the
 statusline owner directory all live under `$QS_STATE_DIR` as well, all structured records.
-Nothing is written outside `$QS_STATE_DIR`, `~/.claude*` and `~/claude-backups`.
+Everything **this tool** writes is under `$QS_STATE_DIR`, `~/.claude*` or `~/claude-backups`
+— ⚠️ but read the red line below before reading that as "and nothing else on the machine
+changes": it starts a `claude` client inside a tmux session, and that process writes
+wherever it writes.
 ⚠️ **上表是「你需要拿主意」的那几个，不是完整文件清单。** 各种锁、影子采样的 state 与事件
 文件、跨账号快照、statusline 归属目录也都在 `$QS_STATE_DIR` 下，都是结构化记录。
-`$QS_STATE_DIR`、`~/.claude*`、`~/claude-backups` 之外不写任何东西。
+**本工具自己**写的东西都在 `$QS_STATE_DIR`、`~/.claude*` 或 `~/claude-backups` 里——
+⚠️ 但在把这句读成「机器上别的什么都不会变」之前，先看下面那条红线：它会在一个 tmux
+会话里起一个 `claude` 客户端，而那个进程写它自己要写的东西。
 
 🔴 **It also starts a process, and the table above is a file table — so read this line too.**
 `read-once`, `monitor-ensure` and `monitor-restart` will **create and keep** a tmux session
