@@ -195,6 +195,33 @@ m_tmp_badvalue(){    # mktemp「成功」但给出不可用的值 ⇒ 第二道�
     'TMP=$(printf /)'
 }
 
+# m_second_sink / m_stdout_sink — 给落账函数**加一条真实的第二出口**，帧照样从别处出去。
+# ⭐ 动的是触发条件（多了一个出口），不是断言：断言一个字没改。
+# ⚠️ 用专用 mutator 而不是 m_sed：要插入的是**带换行的多行文本**，从 shell 传过去会被
+#    展开或截断；锚点与插入体都写在 python 里就没有这一层。
+# m_second_sink / m_stdout_sink — add a REAL second exit to the logging function, so the
+# frame leaves by another route. ⭐ The triggering condition is mutated (one more exit),
+# never the assertion. A dedicated mutator, not m_sed, because the inserted text is
+# multi-line and would not survive the shell.
+_m_insert_sink(){
+  python3 - "$C/lib/state.sh" "$1" <<'MUT'
+import sys
+p, sink = sys.argv[1], sys.argv[2]
+anchor = '  quota_panel_observations_prune_if_due "$observed" || true\n'
+s = open(p).read()
+assert s.count(anchor) == 1, "anchor not unique in lib/state.sh"
+open(p, 'w').write(s.replace(anchor, sink + anchor, 1))
+MUT
+}
+# ① 另一个文件：正是 2026-08-31 review 用来证伪「任何口子」那句声称的那条注入。
+# ① Another file: exactly the injection the 2026-08-31 review used to disprove
+#    the "through any route" claim.
+m_second_sink(){ _m_insert_sink '  printf '"'"'%s\n'"'"' "$frame" >> "$QUOTA_LOG"\n'; }
+# ② stdout：写文件是一种出口，打印出来是另一种。断言把 stdout/stderr 也收了，这条证明那一格。
+# ② stdout: printing is a second kind of exit. The assertion captures stdout/stderr; this
+#    ablation is what proves that half is not decoration.
+m_stdout_sink(){ _m_insert_sink '  printf '"'"'%s\n'"'"' "$frame"\n'; }
+
 # ══ 1. the frozen control group / 冻结对照组 ══════════════════════════════
 ablate frozen-control-edited \
   "冻结对照组被改动时整套回归拒绝开跑（哈希断言）" --fast \
@@ -439,7 +466,7 @@ ablate compare-log-heartbeat \
 # ① Somebody flips the default back (a packager, a distro patch, "I need it on this box")
 ablate panel-text-default-on \
   "默认必须不落整屏原文（默认值被翻回 1）" --fast \
-  "默认就把可见屏原文写进了观测文件" \
+  "默认就把可见屏原文送了出去" \
   m_sed lib/config.sh \
     'QUOTA_PANEL_TEXT_CAPTURE="${QUOTA_PANEL_TEXT_CAPTURE:-0}"' \
     'QUOTA_PANEL_TEXT_CAPTURE="${QUOTA_PANEL_TEXT_CAPTURE:-1}"'
@@ -449,7 +476,7 @@ ablate panel-text-default-on \
 #    writes it unconditionally, which makes this the most likely regression of the four.
 ablate panel-text-unconditional \
   "写入条件掉了 → 默认又落原文（基线形态回归）" --fast \
-  "默认就把可见屏原文写进了观测文件" \
+  "默认就把可见屏原文送了出去" \
   m_sed lib/state.sh \
     'if $capture==1 then .panel_text = $ENV.QS_JQ_FRAME else . end' \
     'if true then .panel_text = $ENV.QS_JQ_FRAME else . end'
@@ -477,6 +504,24 @@ ablate frame-back-in-argv \
   m_sed lib/state.sh \
     '--arg status "$status" --arg sha "$sha" --argjson capture "$capture"' \
     '--arg status "$status" --arg frame "$frame" --arg sha "$sha" --argjson capture "$capture"'
+
+# ⑤⑥ 「任何口子」那句声称的两条腿。🩸 这条判据的**第一版**只 grep 一个文件，而注释写的是
+#    「任何口子」——2026-08-31 review 注入一条真实的第二出口，整套 --fast 仍 PASS 106/FAIL 0。
+#    ⭐ 判据的射程与它的自我描述一旦分叉，绿色读起来仍然像那句大话被验过了。
+#    这两条把那次反例固化成可复跑的消融：扩宽之后，两种出口都必须让点名的那条断言变红。
+# ⑤⑥ The two legs of the "through any route" claim. 🩸 The FIRST version of this assertion
+#    grepped a single file while the comment said "any route"; the 2026-08-31 review
+#    injected a real second sink and the whole --fast run stayed PASS 106 / FAIL 0.
+#    These freeze that counterexample into re-runnable ablations.
+ablate frame-second-sink \
+  "整屏原文不得从第二个文件出去（review 那条反例的固化）" --fast \
+  "默认就把可见屏原文送了出去" \
+  m_second_sink
+
+ablate frame-to-stdout \
+  "整屏原文不得从 stdout 出去（断言收 stdout/stderr 那一格不是摆设）" --fast \
+  "默认就把可见屏原文送了出去" \
+  m_stdout_sink
 
 echo
 echo "── 三列对照表 / guard -> ablation -> observed ──"

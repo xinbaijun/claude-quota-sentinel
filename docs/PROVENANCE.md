@@ -199,7 +199,7 @@ extracted together with the code on purpose.
 | `quota_monitor_bind_owner` | `e2f32279:scripts/sentinel-quota:3090-3129` |
 | `quota_session_created` | `e2f32279:scripts/sentinel-quota:3241-3246` |
 | `quota_session_generation_matches` | `e2f32279:scripts/sentinel-quota:3248-3254` |
-| `quota_capture_pane_tail` | `e2f32279:scripts/sentinel-quota:3371-3387` |
+| `quota_capture_pane_tail` | `e2f32279:scripts/sentinel-quota:3371-3387` — ⚠️ **extracted but unreferenced**: zero call sites here. Kept and listed rather than silently dropped; see the known-gap note at its definition / **抽取了但没人调用**：本仓零调用点。保留并列出而不是静默丢掉，见定义处的已知缺口注释 |
 | `quota_ratio_update` | `e2f32279:scripts/sentinel-quota:3678-3698` |
 | `quota_ratio_value` | `e2f32279:scripts/sentinel-quota:3700-3712` |
 | `quota_capacity_update` | `e2f32279:scripts/sentinel-quota:3714-3785` |

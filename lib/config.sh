@@ -506,6 +506,19 @@ QUOTA_PANEL_OBSERVATIONS_LOCK="${QUOTA_PANEL_OBSERVATIONS_LOCK:-$QS_STATE_DIR/qu
 #      whatever your pane is, since only the panel_text part grows with it. And the first
 #      number is one host, one configuration, one panel layout: sample your own file
 #      before assuming either transfers.
+#    ⚠️ Provenance of the first figure, stated so it is not mistaken for a local result:
+#      it is **an observation from a different machine, relayed into this repo, not
+#      measured in it**. Only the ≈ 0.56 KB beside it was measured here.
+#    🔴 Why this number stays although other measurements from that host were removed —
+#      written down so nobody re-litigates it in either direction. What was removed was a
+#      **security posture** (is `hidepid` on, how many local accounts, are addresses
+#      sitting in `argv`): publishing that describes one machine's weakness and helps no
+#      reader. **This one is the reason the default exists.** Without a measured size,
+#      "storing the whole screen adds up" is an assertion, and a default with no evidence
+#      behind it is the first thing someone flips back. It is a capacity observation, it
+#      exposes no weakness, and it already carries its scope.
+#      ⇒ Do not delete it as "a number from their host", and do not take it as licence to
+#        add new site measurements next to it.
 #
 # 🔴 QUOTA_PANEL_TEXT_CAPTURE —— 默认关，而**默认值本身就是这条的全部意义**。
 #
@@ -529,6 +542,16 @@ QUOTA_PANEL_OBSERVATIONS_LOCK="${QUOTA_PANEL_OBSERVATIONS_LOCK:-$QS_STATE_DIR/qu
 #    ⇒ 在那台宿主的帧尺寸下约 **6 倍**。⭐ 不是「一个数量级」——倍数就是你的 pane 有多大，
 #      因为只有 panel_text 那部分随它增长。而且前一个数是一台宿主、一套配置、一种面板排版：
 #      在假定其中任何一个对你也成立之前，先量一下你自己那份文件。
+#    ⚠️ 前一个数的来源，写明以免被当成本地实测：它是**另一台机器上的观测、转述进本仓的，
+#      不是在本仓量的**。旁边那个 ≈ 0.56 KB 才是本仓实测。
+#    🔴 为什么同一台宿主的别的实测被拿掉了、这个数却留着——写下来，免得以后有人往两个方向
+#      任意重判。拿掉的那些是**安全姿态**（有没有开 `hidepid`、有几个本地账号、`argv` 里有
+#      没有地址）：公开它们等于描述某一台机器的弱点，而且对读者没有用。
+#      **这一个是「这个默认值为什么存在」的实证支撑。** 没有一个量过的尺寸，
+#      「存整屏会攒起来」就只是一句断言，而一个背后没有证据的默认值，是最先被人翻回去的
+#      那一个。它是容量观测、不暴露弱点，而且口径已经标在旁边。
+#      ⇒ 既不要把它当成「他们那台机器上的数」删掉，也不要拿它当作可以在旁边再加新现场数的
+#        许可证。
 QUOTA_PANEL_TEXT_CAPTURE="${QUOTA_PANEL_TEXT_CAPTURE:-0}"
 # Observations are kept seven days; the structured source results and quota.log
 # are unaffected. Pruning runs at most once a day, so the physical retention ceiling

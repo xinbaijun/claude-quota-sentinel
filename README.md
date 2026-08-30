@@ -110,15 +110,28 @@ able to decide whether to trust it before you read anything else.
 ⚠️ **That table is the set you should decide about, not the complete file listing.** The
 locks, the shadow-sampling state and event files, the cross-account snapshot and the
 statusline owner directory all live under `$QS_STATE_DIR` as well, all structured records.
-Everything **this tool** writes is under `$QS_STATE_DIR`, `~/.claude*` or `~/claude-backups`
-— ⚠️ but read the red line below before reading that as "and nothing else on the machine
-changes": it starts a `claude` client inside a tmux session, and that process writes
-wherever it writes.
+
+Everything this tool **persists** is under `$QS_STATE_DIR`, `~/.claude*` or
+`~/claude-backups`. **It also writes short-lived temporary files outside those roots**, and
+they are named here rather than waved at: `${TMPDIR:-/tmp}/quota-sentinel-oauth-body.*` and
+`…-oauth-header.*` (`lib/reading.sh:871-872`), a bare `mktemp` for the same body
+(`account-probe:186`), and `${TMPDIR:-/tmp}/.qs-probe-err.$$` (`account-probe:310`). All
+four are `mktemp`-created `0600` and `rm -f`'d on the normal path; the OAuth **token** is
+not among them — it travels on an anonymous pipe fd, never a file.
+⚠️ And before reading any of that as "nothing else on the machine changes": read the red
+line below. This tool starts a `claude` client inside a tmux session, and **that** process
+writes wherever it writes.
 ⚠️ **上表是「你需要拿主意」的那几个，不是完整文件清单。** 各种锁、影子采样的 state 与事件
 文件、跨账号快照、statusline 归属目录也都在 `$QS_STATE_DIR` 下，都是结构化记录。
-**本工具自己**写的东西都在 `$QS_STATE_DIR`、`~/.claude*` 或 `~/claude-backups` 里——
-⚠️ 但在把这句读成「机器上别的什么都不会变」之前，先看下面那条红线：它会在一个 tmux
-会话里起一个 `claude` 客户端，而那个进程写它自己要写的东西。
+
+本工具**持久化**的东西都在 `$QS_STATE_DIR`、`~/.claude*` 或 `~/claude-backups` 里。
+**它另外还会在这三个根之外写短命临时文件**——这里逐个点名而不是含糊带过：
+`${TMPDIR:-/tmp}/quota-sentinel-oauth-body.*` 与 `…-oauth-header.*`
+（`lib/reading.sh:871-872`）、同样内容的一个裸 `mktemp`（`account-probe:186`）、
+以及 `${TMPDIR:-/tmp}/.qs-probe-err.$$`（`account-probe:310`）。四处都是 `mktemp` 建的
+`0600`，正常路径上都会 `rm -f`；OAuth **令牌不在其中**——它走匿名 pipe fd，不落文件。
+⚠️ 在把上面任何一句读成「机器上别的什么都不会变」之前，先看下面那条红线：本工具会在一个
+tmux 会话里起一个 `claude` 客户端，而**那个**进程写它自己要写的东西。
 
 🔴 **It also starts a process, and the table above is a file table — so read this line too.**
 `read-once`, `monitor-ensure` and `monitor-restart` will **create and keep** a tmux session
@@ -680,9 +693,21 @@ line reference is worse than none**.
      **`/proc` 有没有把别人的进程藏起来**：在挂载选项里找 `hidepid=` 或 `subset=pid`；
      两个都没有，`/proc/<pid>/cmdline` 就是**每个本地用户**都读得到。
   2. **Is there anybody to read it?**
-     `getent passwd | awk -F: '$3>=1000 && $3<65534 {print $1}'` — every name printed is
-     somebody who can type `ps aux`.
-     **有没有人来读**：打印出来的每个名字，都是一个能敲 `ps aux` 的人。
+     `getent passwd | awk -F: '$3>=1000 && $3<65534 {print $1, $7}'` — name and login
+     shell. ⚠️ **What this prints is local ACCOUNTS, not "people who can log in":** an
+     account whose 7th field is `/sbin/nologin` or `/bin/false` normally cannot get a
+     shell (though a service account may still have some other way in — decide per line,
+     do not subtract blindly).
+     ⭐ Same discipline as question 3: **this is a list to read line by line, not a count
+     to quote.** Service accounts routinely make up a large share of what this prints, so
+     an "N other users can see your addresses" summary is easy to get wrong by a wide
+     margin — in either direction.
+     **有没有人来读**：打印的是名字与登录 shell。⚠️ **它列出的是本地【账号】，不是
+     「能登录的人」**：第 7 列是 `/sbin/nologin` 或 `/bin/false` 的通常拿不到 shell
+     （但服务账号仍可能有别的入口——**逐行判断，不要盲目相减**）。
+     ⭐ 与第 3 问同一条纪律：**这是一份要一条条读的清单，不是一个可以拿去当结论的计数。**
+     服务账号往往占了打印结果里相当一部分 ⇒ 一句「有 N 个别的用户看得到你的地址」
+     **很容易错得很离谱，而且两个方向都可能错**。
   3. **Is anything of yours on a command line right now?**
      `ps -eo pid,args | grep -F '@' | grep -v grep` — ⚠️ that is a substring match on `@`,
      **not** an address detector: **read the hits, do not count them.**
@@ -1134,14 +1159,23 @@ build one.
   KB each. ⇒ ≈ **6×** at that host's frame size. ⭐ Not "an order of magnitude": only the
   `panel_text` part grows with your pane, so the multiple is whatever your pane is, and
   the first number is one host with one configuration and one panel layout. Sample your
-  own file rather than assuming either transfers. The file is `0600`, but it is a plain
-  file: if you back up `$QS_STATE_DIR`, you back this up too.
+  own file rather than assuming either transfers. ⚠️ The first figure is **an observation
+  from a different machine, relayed here, not measured in this repo**; only the ≈ 0.56 KB
+  was measured here. It is kept — while other measurements from that host were deliberately
+  removed — because it is a **capacity** observation that exposes no weakness and is the
+  evidence for why this default exists; what was removed was a **security posture**. See
+  the note at `QUOTA_PANEL_TEXT_CAPTURE` in `lib/config.sh`. The file is `0600`, but it is
+  a plain file: if you back up `$QS_STATE_DIR`, you back this up too.
   查完就设回 `0`；开着的期间把 `QUOTA_PANEL_RETENTION_SEC` 调小。两个数、各带各的口径，
   因为比例取决于**你的** pane：capture **开** —— 抽取宿主 2026-08-31 实测、10s 采样、
   7 天保留：247 MB / 73,828 条 ≈ 每条 3.3 KB；**默认** —— 本仓用一帧 7 行的合成夹具实测
   ≈ 每条 0.56 KB。⇒ 在那台宿主的帧尺寸下约 **6 倍**。⭐ 不是「一个数量级」：只有
   `panel_text` 那部分随你的 pane 增长，倍数就是你的 pane 有多大；而前一个数是一台机器、
   一套配置、一种面板排版。请量你自己那份文件，别假定其中任何一个对你也成立。
+  ⚠️ 前一个数是**另一台机器上的观测、转述到这里的，不是本仓量的**；只有 ≈ 0.56 KB 是本仓
+  实测。同一台宿主的别的实测被有意拿掉了而它留着，是因为它是**容量**观测、不暴露任何弱点，
+  且它正是「这个默认值为什么存在」的证据；拿掉的那些是**安全姿态**。
+  详见 `lib/config.sh` 里 `QUOTA_PANEL_TEXT_CAPTURE` 那段。
   文件是 `0600`，但它就是个普通文件：你备份 `$QS_STATE_DIR`，就一起备份了它。
 - ⭐ **Why the default is off rather than "documented"** — this default decides what ends
   up on **someone else's** disk. Here the monitored session only ever runs `/usage`, so
@@ -1156,6 +1190,17 @@ build one.
   routinely read as "we store nothing".
   每一帧的 sha256 一律记录。它不让任何人**读回**一张屏，但它让**猜得出**某张屏的人确认自己
   猜对了。写出来是因为「我们只存了哈希」经常被读成「我们什么都没存」。
+
+- ⚠️ **One screen-grabbing path this switch does not cover / 有一条取屏路径这个开关管不到** —
+  `quota_capture_pane_tail` (`lib/state.sh`) runs its own `tmux capture-pane -S -50`. It
+  currently has **zero call sites**, so nothing happens today; it is named here because
+  "dead code" and "covered by the default" are not the same statement, and only the first
+  one is true of it. If a future change reconnects it, the frame it returns is outside
+  everything described above.
+  `quota_capture_pane_tail`（`lib/state.sh`）自己会跑 `tmux capture-pane -S -50`。
+  它目前**零调用点**，所以今天什么也不会发生；写在这里是因为「它是死代码」与
+  「它被这个默认值覆盖了」是两句不同的话，**只有前一句对它成立**。将来哪次改动把它接上，
+  它取回来的那一屏不在上面任何一句的射程里。
 
 ### K-gap · Guards that did not come across / 没有随抽取过来的守卫
 

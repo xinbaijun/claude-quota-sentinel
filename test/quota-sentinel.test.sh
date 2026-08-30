@@ -1767,15 +1767,67 @@ if [[ -n "$QS_TEST_PANEL_CAPTURE_PRESET" ]]; then
   fail "环境里预置了 QUOTA_PANEL_TEXT_CAPTURE ⇒ 下面这组测的不是 lib/config.sh 里的默认值"
 fi
 
-# ⭐ A canary line that parses into NOTHING, so it cannot reach the file through any
-#    structured field. `has("panel_text")` answers "is that one key absent"; the canary
-#    answers "did any of this screen get out, through any route".
+# ⭐ A canary line that parses into NOTHING, so it cannot reach any structured field.
+#    `has("panel_text")` answers "is that one key absent"; the canary answers the wider
+#    question: "did any of this screen reach any file, or stdout/stderr, by any route
+#    inside this sandbox".
 # ⭐ 金丝雀行解析不出任何字段，所以它进不了任何结构化字段这条路。
-#    `has("panel_text")` 答的是「那一个键在不在」；金丝雀答的是「这一屏有没有从任何口子漏出去」。
-PANEL_CANARY='CANARY-whatever-else-was-on-this-screen-0d5f'
+#    `has("panel_text")` 答的是「那一个键在不在」；金丝雀答的是更宽的一问：
+#    「这一屏有没有**在本沙箱内**，经**任何**路径进到**任何文件**或 stdout/stderr」。
+#
+# 🩸 2026-08-31 m5b review 实撞：这条断言的**第一版**只 grep `$QUOTA_PANEL_OBSERVATIONS`
+#    **一个文件**，而注释写的是「任何口子」。reviewer 在副本里注入了一条真实的第二出口
+#    （`printf '%s\n' "$frame" >> "$QUOTA_LOG"`）——**整屏原文每 10 秒进一次 `quota.log`，
+#    而整套 `--fast` 仍然 PASS 106 / FAIL 0，这条断言仍然绿。**
+#    ⭐ 教训不是「话说大了」，是**判据的射程与它的自我描述必须同时可核**；
+#      两者一旦分叉，绿色读起来仍然像是那句大话被验过了。
+#    ⇒ 现在把判据做到配得上那句话（AGENT 裁定选「扩断言」而非「缩声称」：
+#      「任何口子都不漏」这句声称本身是有价值的那个，缩掉它等于把判据降级成
+#      「某个文件里没有」）。消融 `frame-second-sink` 把那条反例固化成可复跑的一条。
+#
+# ⚠️ **搜的是 `$TMP`（整个测试沙箱），不是 `$QS_STATE_DIR`** —— 这不是随手放宽。
+#    本套件把若干 `QUOTA_*` 路径**直接绑到 `$TMP` 下而不是 `$QS_STATE_DIR` 下**
+#    （`QUOTA_LOG="$TMP/quota.log"` 就是其一）⇒ **只搜 `$QS_STATE_DIR` 恰好搜不到
+#    reviewer 那条反例**，也就是搜不到这条判据为之而写的那个东西。
+#    （生产环境里 `quota.log` 确实在 `$QS_STATE_DIR` 下；分叉只存在于测试夹具里，
+#      而判据跑在夹具里。）
+# ⚠️ Searched root is `$TMP` (the whole test sandbox), not `$QS_STATE_DIR`: this suite
+#    rebinds several QUOTA_* paths directly under `$TMP` (`QUOTA_LOG="$TMP/quota.log"` is
+#    one), so searching only `$QS_STATE_DIR` would have missed the very counterexample
+#    this assertion was widened for.
+#
+# ⚠️ 扩完之后**仍然拦不住**的口子，逐条写在这里，别让声称又跑到射程前面：
+#    ① **编码后落盘** —— `grep -F` 只认逐字原文，base64 / hex / 转义变形一律漏。
+#    ② **落到 `$TMP` 之外** —— 判据只搜测试沙箱。⚠️ 这一条**很实**：`lib/reading.sh:871-872`
+#       与 `account-probe:186,310` 真的会写 `${TMPDIR:-/tmp}`（那几处写的是 OAuth 响应，
+#       不是帧；但「沙箱外无人看」这个结构性缺口是真的）。
+#    ③ **上命令行** —— 由 `_frame_in_argv` 那条静态判据管，而它**按变量名**认，改个名就漏。
+#    ④ **不发生在这一次调用里的泄漏** —— 只观察这一次调用之后的落点，
+#       后台写入、延迟 flush、下一拍才写出去的东西，这里看不见。
+# ⚠️ Still NOT covered after the widening, stated rather than implied: ① encoded copies
+#    (`grep -F` is literal only); ② anything written outside `$TMP` — real, see
+#    `lib/reading.sh:871-872` and `account-probe:186,310` writing `${TMPDIR:-/tmp}`;
+#    ③ command lines, covered by `_frame_in_argv`, which recognises BY VARIABLE NAME;
+#    ④ leaks that do not happen during this one call (background or deferred writes).
+#
+# ⚠️ 两个方向用**两个不同的金丝雀串**：默认方向要在**整个 `$TMP`** 里搜「一个都不许有」，
+#    而 opt-in 方向**故意**把原文写进 `$TMP` 下另一个文件 ⇒ 共用一个串会让默认方向
+#    在用例顺序改变时被自己的 opt-in 产物打红（一个纯粹由脚手架造出来的假红）。
+# ⚠️ Two DIFFERENT canaries on purpose: the default direction searches all of `$TMP` for
+#    zero occurrences, while the opt-in direction deliberately writes the text into
+#    another file under `$TMP`. Sharing one string would let a re-ordering of the cases
+#    turn the default assertion red for a purely scaffolding reason.
+PANEL_CANARY='CANARY-default-whatever-else-was-on-this-screen-0d5f'
+PANEL_CANARY_OPTIN='CANARY-optin-whatever-else-was-on-this-screen-7b3e'
 PANEL_WITH_CANARY="$PANEL_OK"$'\n'"$PANEL_CANARY"
+PANEL_WITH_CANARY_OPTIN="$PANEL_OK"$'\n'"$PANEL_CANARY_OPTIN"
 rm -f "$QUOTA_PANEL_OBSERVATIONS"
-quota_panel_log_observation "$SCHED_NOW" 'sched@x' 'uuid-s' local_sample clean "$PANEL_WITH_CANARY"
+# stdout/stderr 一并收走：写到文件是一种出口，打印出来是另一种，两种都要看。
+# Capture stdout+stderr too: printing it out is a second kind of exit, not a lesser one.
+_obs_io=$(quota_panel_log_observation "$SCHED_NOW" 'sched@x' 'uuid-s' local_sample clean "$PANEL_WITH_CANARY" 2>&1)
+# 先落到变量再判，不写成 `… | grep -q`：本文件开着 pipefail，命中会被报成没命中。
+# Assign first, never `… | grep -q`: pipefail would report a match as no match.
+_obs_leaks=$(grep -rlF -- "$PANEL_CANARY" "$TMP" 2>/dev/null || true)
 if jq -e '
      .source=="usage_panel_screen" and .mode=="local_sample" and .status=="clean"
      and .account.email=="sched@x" and .cadence.local_sample_seconds==10
@@ -1783,10 +1835,11 @@ if jq -e '
      and (.panel_sha256|length)==64
      and .panel_text_captured==false and (has("panel_text")|not)' \
      "$QUOTA_PANEL_OBSERVATIONS" >/dev/null 2>&1 \
-   && ! grep -Fq -- "$PANEL_CANARY" "$QUOTA_PANEL_OBSERVATIONS"; then
-  pass "默认落盘：账号/时刻/档位/解析值/SHA 齐全，可见屏原文一个字都没进文件"
+   && [[ -z "$_obs_leaks" ]] \
+   && [[ "$_obs_io" != *"$PANEL_CANARY"* ]]; then
+  pass "默认落盘：结构化字段齐全，且整个沙箱里没有任何文件、stdout/stderr 也没有出现过屏幕原文"
 else
-  fail "默认就把可见屏原文写进了观测文件：装这套的人屏幕上有什么就被存下什么"
+  fail "默认就把可见屏原文送了出去（文件落点：${_obs_leaks:-无}；stdout/stderr 命中：$( [[ "$_obs_io" == *"$PANEL_CANARY"* ]] && echo 有 || echo 无 )）——装这套的人屏幕上有什么就被送到哪"
 fi
 
 if (
@@ -1794,8 +1847,8 @@ if (
   QUOTA_PANEL_OBSERVATIONS="$TMP/quota-panel-observations.optin.jsonl"
   QUOTA_PANEL_PRUNE_STAMP="$TMP/quota-panel-observations.optin.prune-ts"
   rm -f "$QUOTA_PANEL_OBSERVATIONS"
-  quota_panel_log_observation "$SCHED_NOW" 'sched@x' 'uuid-s' local_sample clean "$PANEL_WITH_CANARY"
-  jq -e --arg raw "$PANEL_WITH_CANARY" '
+  quota_panel_log_observation "$SCHED_NOW" 'sched@x' 'uuid-s' local_sample clean "$PANEL_WITH_CANARY_OPTIN"
+  jq -e --arg raw "$PANEL_WITH_CANARY_OPTIN" '
      .panel_text==$raw and .panel_text_captured==true
      and (.panel_sha256|length)==64' "$QUOTA_PANEL_OBSERVATIONS" >/dev/null 2>&1
 ); then

@@ -264,6 +264,64 @@ suite was migrated, and they are in **historical versions of
 |---|---|---|
 | **A** — working tree / 工作树 | **0** | ✅ replaced with `accountA`/`accountB`/`accountC` placeholders |
 | **B** — all git objects, including unreachable blobs / 全部 git 对象（含不可达 blob） | **114 lines** | 🔴 **unchanged, and not removable by editing the working tree** |
+| **C** — commit messages / commit message | **not names** — see the baseline below / **不是人名**，基线见下 | ⚠️ a different substance; listed here only because this is where a reader looks after a DIRTY verdict / 另一种物质，列在这里只是因为读者看到 DIRTY 之后会先来这张表 |
+
+### Expected baseline for range C / 范围 C 的预期基线
+
+⚠️ **A scan that is expected to be red, with nobody able to say how red, stops being
+evidence.** This repo's own scanner opens by arguing that a check which cannot fail proves
+nothing; a check that **always** fails proves just as little. So range C gets a stated,
+checkable baseline rather than a shrug.
+⚠️ **一个「预期就是红」、又没人说得出该红几条的检查，就不再是证据了。** 本仓的扫描器开篇
+论证的是「不可能失败的检查什么也不证明」；一个**永远失败**的检查同样什么也不证明。
+⇒ 范围 C 给出可核基线，而不是一句「知道了，是预期的」。
+
+- **What is in there** — every commit created under the Fleet commit convention carries a
+  `Co-Authored-By: … <noreply@anthropic.com>` trailer, and the published generic-email
+  pattern in `tools/dod4-patterns.example.txt` matches it. It is not an account-roster
+  address, not a credential, not an internal path.
+  **里面是什么**：按 Fleet 的 commit 惯例，每个 commit 都带一行
+  `Co-Authored-By: … <noreply@anthropic.com>` trailer，被已公开的通用邮箱模式命中。
+  它不是账号名册里的地址、不是凭据、不是内网路径。
+- **The baseline is a formula, not a number** — it is **one hit per commit carrying that
+  trailer**, so it grows by one with every new commit. Verify with
+  `git log --format=%B | grep -c 'Co-Authored-By'` and compare against the `C-message`
+  lines the scan prints. ⭐ A frozen number would be wrong by the next commit; that is
+  exactly how a baseline turns into noise.
+  **基线是个式子，不是一个数**：**每个带该 trailer 的 commit 一条**，因此每提交一次就 +1。
+  核法：拿 `git log --format=%B | grep -c 'Co-Authored-By'` 与扫描打印的 `C-message` 行数
+  对照。⭐ 钉一个固定数字下一次提交就作废——基线正是这样变成噪音的。
+- **Locally it is excused; on a fresh clone it is not** — `tools/dod4-allow.local.txt`
+  (gitignored) excuses **the exact literal address**, so the scan run here comes back to
+  `A/C/D/E = 0`. A fresh clone has no such file and will report those C lines. ⚠️ That
+  direction is the safe one: a site allowance can only blind **us**, never a third party.
+  **本地被豁免，新 clone 上不会**：`tools/dod4-allow.local.txt`（已 gitignore）豁免的是
+  **那个完整字面地址**，所以在这里扫回到 `A/C/D/E = 0`；一份新 clone 没有这个文件，会照常
+  报出那几条 C。⚠️ 这个方向是安全的那个：站点豁免只可能让**我们自己**少看见，不会让别人少看见。
+- **Why it is not in the published allow file** — `tools/dod4-allow.example.txt` states its
+  own admission rule: a vendor's domain, or a specific address someone decided is fine,
+  **must not** go in it, and site-specific allowances belong in the `.local` file. Making
+  an exception to a written long-term rule so that today's scan turns green is how that
+  rule stops working for the next person.
+  **为什么没进已公开的 allow 文件**：`tools/dod4-allow.example.txt` 自己写着准入规则——
+  供应商域名、以及「某个你判断没问题的具体地址」**都不许**进去，站点豁免应写进 `.local`。
+  为了让今天这次扫描变绿而给一条长期规则破例，就是那条规则以后拦不住别人的开始。
+- **Controls, both run 2026-08-31** — ① after adding the allowance,
+  `tools/dod4-scan.posctrl.sh` still reports `RANGE C-message fired OK` ⇒ the allowance did
+  not switch a range off; ② in a throwaway repo, a **different local part at the same
+  domain** is still reported while the allowed literal is not ⇒ the allowance is
+  literal-scoped, not domain-scoped. The recipe for ② is in the allow file itself.
+  ⚠️ The second address is described rather than written out, and that is not squeamishness:
+  writing an example address into this file makes the scanner report **this file**, and the
+  person investigating becomes the event source. (Measured while writing this paragraph —
+  the first draft spelled it out and turned range A red, from 0 to 1.)
+  **两条控，2026-08-31 都跑过**：① 加完豁免后 `tools/dod4-scan.posctrl.sh` 的
+  `RANGE C-message` 仍 `fired OK` ⇒ 没有用 allowlist 把一整个范围关掉；② 在一次性仓里，
+  同域另一个地址仍被报出、被豁免的那个字面串不被报出 ⇒ 豁免的射程是**字面串**不是域。
+  ② 的复跑配方写在 allow 文件里。
+  ⚠️ 第二个地址在这里只**描述**、不写出来，这不是讲究：把一个示例地址写进本文件，扫描器就会
+  报**本文件**，排查者自己变成了事件源。（写这段时实测：初稿写全了，范围 A 当场从 0 变 1。）
+
 
 ⭐ **"What gets written from now on is clean" and "what already happened has been erased"
 are two different statements.** Only the first is true here.

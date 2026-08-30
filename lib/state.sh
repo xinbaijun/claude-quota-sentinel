@@ -700,6 +700,22 @@ quota_session_generation_matches() {
 #    `Enter to confirm · Esc to cancel` 且没有空闲光标——那是**此刻正弹着框**的
 #    现在时证据，不可能是滚动区里的历史残留。
 #    「只有横幅、没有活菜单」那一类继续留给原来的补扫（受事故痕迹约束），不在这里处理。
+# ⚠️ KNOWN GAP, registered rather than left silent (2026-08-31 m5b review):
+#    **this function has zero call sites in this repository.** It is carried over from the
+#    baseline and `docs/PROVENANCE.md` still lists it. Today it is dead code and therefore
+#    harmless — ⭐ but it is its own `capture-pane`, on its own path, and
+#    **QUOTA_PANEL_TEXT_CAPTURE does not reach it**: whoever reconnects it later gets a
+#    screen-grabbing path that the default this milestone installed does not cover.
+#    ⇒ Reconnecting it means deciding what it does with the frame, in the same terms as
+#      `quota_panel_log_observation`. Deleting it instead is fine too — but then the
+#      PROVENANCE mapping row goes with it, in the same commit.
+# ⚠️ **已知缺口，登记而不是无声留着**（2026-08-31 m5b review 指出）：
+#    **本函数在本仓零调用点**。它是从基线抄过来的，`docs/PROVENANCE.md` 里还为它列着映射行。
+#    今天是死代码、因此无害——⭐ 但它自己会 `capture-pane`、走自己的路径，而
+#    **`QUOTA_PANEL_TEXT_CAPTURE` 管不到它**：将来把它接上的人，会得到一条不受本里程碑
+#    这个默认值保护的取屏路径。
+#    ⇒ 接它回来时必须同时决定「帧怎么处置」，口径与 `quota_panel_log_observation` 一致。
+#      直接删掉也可以——但那样 PROVENANCE 那行映射必须在同一个 commit 里一起走。
 quota_capture_pane_tail() { tmux capture-pane -t "$1" -p -S -50 2>/dev/null; }
 
 quota_ratio_update() {
