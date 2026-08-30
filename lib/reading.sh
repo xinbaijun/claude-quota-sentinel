@@ -589,6 +589,18 @@ quota_shadow_statusline_ingest() (
   return 0
 )
 
+# 🔻 REWRITTEN DURING EXTRACTION. Baseline: `sentinel-quota:991-1011` @ e2f32279.
+#    What changed: the four ownership values (account, uuid, generation, launch id) used
+#    to be four positional arguments inside the `--settings` JSON. What that cost: they
+#    were then part of the monitor CLI process argv, so an account address was readable
+#    by any user from `/proc/<pid>/cmdline` for the whole session. They now travel in a
+#    0600 file. The fence is unchanged in effect: a stale generation reads no ownership
+#    and returns, exactly as it previously failed the value comparison.
+# 🔻 抽取时重写。基线 `sentinel-quota:991-1011` @ e2f32279。
+#    改了什么：归属四值（账号、UUID、代际、launch id）原本是 `--settings` JSON 里的四个
+#    位置参数。代价是什么：它们因此成了 monitor CLI 进程 argv 的一部分，账号地址在**整个
+#    会话期间**都能被任意用户从 `/proc/<pid>/cmdline` 读到。现在改走 0600 文件。
+#    围栏效果不变：旧代际读不到归属就直接返回，与原来「值对不上所以自我拒绝」同果。
 # 构造专用 monitor 的命令。--settings 是仅此进程的 overlay，不改用户全局 settings。
 #
 # 🔴 归属那四个值（账号、UUID、代际、launch id）**走文件，不走命令行**。

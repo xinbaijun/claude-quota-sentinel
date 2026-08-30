@@ -89,8 +89,8 @@ extracted together with the code on purpose.
 
 ### `lib/reading.sh`  ←  `scripts/sentinel-quota`
 
-| function / 函数 | baseline lines / 基线行号 |
-|---|---|
+| function / 函数 | baseline lines / 基线行号 | note / 说明 |
+|---|---|---|
 | `quota_snapshot_read` | `e2f32279:scripts/sentinel-quota:329-340` |
 | `quota_reading_apply` | `e2f32279:scripts/sentinel-quota:349-396` |
 | `quota_oauth_fallback_apply` | `e2f32279:scripts/sentinel-quota:421-456` |
@@ -117,7 +117,9 @@ extracted together with the code on purpose.
 | `quota_source_log_usage` | `e2f32279:scripts/sentinel-quota:855-873` |
 | `quota_source_log_usage_failure` | `e2f32279:scripts/sentinel-quota:875-888` |
 | `quota_shadow_statusline_ingest` | `e2f32279:scripts/sentinel-quota:890-989` |
-| `quota_monitor_launch_command` | `e2f32279:scripts/sentinel-quota:991-1011` |
+| `quota_monitor_launch_command` | `e2f32279:scripts/sentinel-quota:991-1011` | 🔻 **rewritten** — the four ownership values moved off the command line into a 0600 file / **重写**：归属四值从命令行改走 0600 文件，见定义处 |
+| `quota_statusline_owner_write` | — no baseline counterpart; new here / 无基线对应，本处新写 | writes that ownership file and prunes the previous generation / 写归属文件并清掉上一代 |
+| `quota_statusline_owner_read` | — no baseline counterpart; new here / 无基线对应，本处新写 | reads it back for the collector / 采集器侧读回 |
 | `quota_shadow_oauth_http_fetch` | `e2f32279:scripts/sentinel-quota:1013-1034` |
 | `quota_shadow_retry_after` | `e2f32279:scripts/sentinel-quota:1036-1048` |
 | `quota_shadow_oauth_due` | `e2f32279:scripts/sentinel-quota:1050-1064` |
@@ -466,12 +468,14 @@ was extracted from.
 ## Rewritten, and why / 重写了什么，为什么
 
 Three functions and one main flow could not come across unchanged, because their
-inputs do not exist outside the environment they were written in; one more was
-rewritten because it hard-coded a single machine's time zone. Each carries a
-`🔻 REWRITTEN` note at its definition explaining what was removed and **what that
-costs** — the cost is stated rather than quietly dropped.
+inputs do not exist outside the environment they were written in; one was rewritten
+because it hard-coded a single machine's time zone; and one was rewritten because the
+way it passed its arguments put an account address on a long-lived command line. Each
+carries a `🔻 REWRITTEN` note at its definition explaining what was removed and **what
+that costs** — the cost is stated rather than quietly dropped.
 三个函数和一段主流程无法原样过来，因为它们的输入在那套环境之外根本不存在；另有一个
-因为写死了某一台机器的时区而被重写。每一个的定义处都带着 `🔻 REWRITTEN` 注释，
+因为写死了某一台机器的时区而被重写；再有一个因为它传参的方式把账号地址放上了一条
+**长命**命令行而被重写。每一个的定义处都带着 `🔻 REWRITTEN` 注释，
 说明删掉了什么、**代价是什么**——代价是写出来的，不是悄悄丢掉的。
 
 > ⚠️ **`quota_cmd_status` 那一条是 m2 review 补上的**：它事实上被改写过（写死的 UTC+8 →
@@ -487,6 +491,7 @@ costs** — the cost is stated rather than quietly dropped.
 | `quota_read_once` (`lib/state.sh`) | `quota_poll_once`, `sentinel-quota:4069–4275` | dead-session reaping, banner sampling, and the whole switching half |
 | `account-probe` main flow | `claude-account-probe:294–379` | multi-account discovery (needs the switching tool) and the container liveness probe (needs Docker, and writes credential copies to disk) |
 | `quota_cmd_status` (`quota-sentinel`) | `sentinel-quota:4853–4936` | the fixed UTC+8 in the header line; plus the recent-switches list and the banner-sample line, which went with the features they belong to |
+| `quota_monitor_launch_command` (`lib/reading.sh`) | `sentinel-quota:991–1011` | nothing removed; the four ownership values moved from the `--settings` command line into a 0600 file. ⚠️ Not a feature cut — an exposure cut / 没删功能，删的是暴露面：归属四值从 `--settings` 命令行改走 0600 文件 |
 
 ## Not extracted / 未抽取
 
