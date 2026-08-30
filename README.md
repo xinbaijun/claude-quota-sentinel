@@ -669,36 +669,49 @@ line reference is worse than none**.
   ⚠️ **买到什么要说准确**：`cmdline` 世界可读，`environ` **只同 UID 可读** ⇒ 准确说法是
   「**不再对任意用户可读**」，**不是**「地址不再暴露」。在一台你本来就是 root 的机器上，
   root 一直都读得到 `environ`。
-- **How concrete is this / 这有多具体** — ⚠️ not a theoretical exposure. Measured on the
-  host this repository was extracted from, 2026-08-31, on the **still-running** system it
-  came from: **5 live processes had a real account address in their `argv`**; that
-  machine's `/proc` is mounted **without `hidepid`**, so `/proc/<pid>/cmdline` is readable
-  by every local user; and the machine carries **6 other user accounts**, any one of which
-  sees those addresses with a plain `ps aux`. ⭐ The contrast that makes the remedy legible
-  is on the same machine: `/proc/<pid>/environ` is `-r--------`, **owner only**. Without
-  that second half a reader cannot tell why moving a value from one to the other helps.
-  ⚠️ **Scope of those numbers**: one machine, one instant, counted on the **still-running
-  system this was extracted from** — not on this repository's code, where the remedy above
-  is already in place. A different machine, a different `hidepid` setting, a different set
-  of live processes, and none of the three numbers is the same number. They answer "how
-  bad is this", not "what is this repo like now".
-  ⚠️ 不是理论上的暴露。2026-08-31 在本仓被抽取出来的那台宿主上实测：**5 个在跑进程的
-  `argv` 里有真实账号地址**；那台机器的 `/proc` **没有 `hidepid`** ⇒ `/proc/<pid>/cmdline`
-  对每个本地用户可读；机器上另有 **6 个用户账号**，其中任何一个 `ps aux` 就看得到。
-  ⭐ 让修法变得可读的对照就在同一台机器上：`/proc/<pid>/environ` 是 `-r--------`，
-  **仅属主**。没有这后半句，读者读不出「把值从前者挪到后者」为什么有效。
-  ⚠️ **口径**：那是**一台**机器、**那一个时刻**的计数，量的是**本仓被抽取出来的那套仍在跑的
-  系统**，不是本仓的代码——本仓这一条已经按上面的写法修好了。换一台机器、换一个 `hidepid`
-  设置、换一组在跑的进程，这三个数就都不是同一个数。它在这里回答的是「这有多严重」，
-  不是「本仓现在怎么样」。
+- **Is this live on YOUR machine? / 这条在你的机器上是不是活的？** — three questions, each
+  with the command that answers it. ⭐ Whether this guard is worth anything is a property of
+  **your** host, so the entry hands you the measurement instead of a number from ours.
+  三问，每一问都附上回答它的命令。⭐ 这条守卫值不值钱，取决于**你的**宿主 ⇒
+  本条给你的是**测法**，不是我们那台机器上的数字。
+  1. **Is `/proc` hiding other users' processes?**
+     `grep ' /proc ' /proc/self/mountinfo` — look for `hidepid=` or `subset=pid` among the
+     options. With neither, `/proc/<pid>/cmdline` is readable by **every local user**.
+     **`/proc` 有没有把别人的进程藏起来**：在挂载选项里找 `hidepid=` 或 `subset=pid`；
+     两个都没有，`/proc/<pid>/cmdline` 就是**每个本地用户**都读得到。
+  2. **Is there anybody to read it?**
+     `getent passwd | awk -F: '$3>=1000 && $3<65534 {print $1}'` — every name printed is
+     somebody who can type `ps aux`.
+     **有没有人来读**：打印出来的每个名字，都是一个能敲 `ps aux` 的人。
+  3. **Is anything of yours on a command line right now?**
+     `ps -eo pid,args | grep -F '@' | grep -v grep` — ⚠️ that is a substring match on `@`,
+     **not** an address detector: **read the hits, do not count them.**
+     **此刻你的东西在不在某条命令行上**：⚠️ 那是对 `@` 的子串匹配，**不是**地址检测器——
+     **命中要一条条读，不要拿去当数字用。**
+  ⚠️ **If you are root, questions 1 and 3 tell you less than they look like they do**: root
+  reads everything regardless, so "I can see it" is no evidence that a non-root user can.
+  Question 1 is the one that decides.
+  ⚠️ **你如果是 root，第 1、3 问的信息量比看起来少**：root 本来就什么都读得到，
+  「我看得见」不构成「非 root 也看得见」的证据。**做判断的是第 1 问。**
+- **Why the remedy works, in one line you can run / 修法为什么有效——一行就能自己验** —
+  ```sh
+  ls -l /proc/$$/cmdline /proc/$$/environ
+  # -r--r--r--  cmdline   <- any local user / 任何本地用户
+  # -r--------  environ   <- owner only     / 仅属主
+  ```
+  ⭐ Without this second half a reader cannot tell why moving a value from one to the other
+  helps at all. It is also the exact bound on the claim: **"no longer readable by ANY
+  user"**, not "no longer exposed".
+  ⭐ 没有这后半句，读者根本读不出「把值从前者挪到后者」为什么有用。它同时也正是这条声称的
+  边界：是「**不再对任意用户可读**」，不是「不再暴露」。
 - **When you should not / 例外** — on a single-user machine this buys you very little, and
   `--arg` is more readable. Pay for it when the machine has other users, or other people's
   processes, that you would rather not hand a list of your account addresses to.
-  ⭐ The measurement above is what "the machine has other users" looks like when you
-  actually go and count instead of assuming.
-  ⭐ 上面那次实测，就是「这台机器上还有别的用户」在**真去数一遍**而不是想当然时的样子。
   单用户机器上这条买不到多少东西，而 `--arg` 更好读。值得买的前提是：这台机器上还有
   别的用户或别人的进程，而你不想把自己的账号地址清单送给他们。
+  ⭐ The three questions above are how you find out which of those two you are on, instead
+  of assuming.
+  ⭐ 上面那三问，就是把「我属于哪一种」**真去查一遍**而不是想当然的办法。
 - ⚠️ **Two things this does not cover, stated rather than implied**: the static check
   recognises an address **by variable name**, so it answers "did a known address-bearing
   variable get put back on a command line" and *not* "is there an address in argv"; the
