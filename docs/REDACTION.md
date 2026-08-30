@@ -6,6 +6,14 @@ that it stayed removed.
 本仓的代码抽取自一个跑在真实 Claude 账号上的私有代码库。本文件记录删掉了什么、怎么删的、
 以及你怎么核实它一直没回来。
 
+> 🔴🔴 **THIS REPOSITORY MUST NEVER BE MADE PUBLIC.** Its git objects contain real
+> people's names. This is known, accepted, and **will not be processed further** — see
+> [Never public](#never-public--本仓永不转-public) below before you consider changing its
+> visibility, and before you assume a history rewrite would fix it.
+> 🔴🔴 **本仓永远不得转为 public。** 它的 git 对象里含真实人名。此事已知、已接受、
+> **不再处置**——在你考虑改仓可见性之前，也在你以为「重写一下历史就行」之前，
+> 先读下面的「本仓永不转 public」。
+
 ## The rule / 规则
 
 No real account address, no credential, no internal path, and no internal hostname may
@@ -199,6 +207,83 @@ answer down** rather than leaving the scanner's silence to speak for it.
 本仓正是靠这一遍人工查出两处这类残留（一条引用了那套系统看板概念的事故注释，
 以及一条把某个名字举例出来、等于披露它在内部命令名单上的注释），两处均已修。
 **正则永远抓不到它们。**
+
+### Never public — real names in this repository's git objects
+### 本仓永不转 public —— git 对象里有真实人名
+
+⚠️ **Status: present, accepted, not processed, and it changes what this repository may be
+used for.** This is a **standing constraint on whoever reads this next**, not a note about
+one milestone.
+
+Real people's names — the short forms of account-roster aliases — are in this
+repository's git objects. They were carried over verbatim from the baseline when the test
+suite was migrated, and they are in **historical versions of
+`test/quota-sentinel.test.sh`**.
+
+**The two ranges are stated separately, and they must not be collapsed into one sentence:**
+
+| range / 范围 | count / 数 | status / 状态 |
+|---|---|---|
+| **A** — working tree / 工作树 | **0** | ✅ replaced with `accountA`/`accountB`/`accountC` placeholders |
+| **B** — all git objects, including unreachable blobs / 全部 git 对象（含不可达 blob） | **114 lines** | 🔴 **unchanged, and not removable by editing the working tree** |
+
+⭐ **"What gets written from now on is clean" and "what already happened has been erased"
+are two different statements.** Only the first is true here.
+
+**Do not assume a history rewrite would fix this.** It would not, and that is measured, not
+argued: **`force-push` does not delete remote objects.** Tested on this repository on
+2026-08-27 — from a brand-new empty clone with only the remote added, fetching four
+already-superseded commits **by SHA** succeeded for all four, and the old file contents
+came back out. So after a rewrite, "the names are gone" is true of the *reachable* history
+and false at the *object* layer. ⚠️ Rewriting **again** does not help either: the old
+commits are already unreachable, and being unreachable is precisely not the problem —
+being *still served* is.
+
+**Therefore the disposition is:**
+
+1. **This repository is an internal working repository and is never made public.**
+2. **Any public release ships from a NEW repository, with a history that is clean from its
+   very first commit** — not from a rewrite of this one.
+
+**Why that is the cheaper path**, which is worth writing down because the obvious move
+looks like the opposite: deleting and recreating the repository *would* really remove the
+objects, but it needs the owner to act and it is irreversible. Publishing was **always**
+going to need the owner to act exactly once. Spending that one action on **creating a new
+repository** instead of **destroying the old one** leaves the owner doing no more work than
+before, and reduces the number of irreversible operations to **zero**.
+
+⚠️ **A boundary on this entry itself**: the names here are account-roster aliases. This
+entry is not a statement that nothing else is in the history — the pattern table
+structurally cannot answer "is there anything the roster does not list", which is what the
+human review passes are for. See [What the scanner structurally cannot cover](#what-the-scanner-structurally-cannot-cover--扫描器结构性覆盖不到什么).
+
+⚠️ **状态：存在、已接受、不再处置，而且它改变了本仓可以被用来做什么。**
+这是**对下一个读到它的人的长期约束**，不是对某一个里程碑的说明。
+
+真实人名（账号名册别名的短形态）在本仓的 git 对象里。它们是迁移回归套件时从基线**原样照抄**
+过来的，位置在 **`test/quota-sentinel.test.sh` 的历史版本**。
+
+**两个范围分开写，不许合成一句**：**范围 A（工作树）已为 0**，已换成
+`accountA`/`accountB`/`accountC` 占位符；**范围 B（全部 git 对象，含不可达 blob）仍有 114 行，
+一处未减，且靠改工作树消不掉**。
+⭐ **「从此刻起新写下的东西是干净的」与「已发生的已经被抹掉」是两句话**，这里只有第一句为真。
+
+**不要以为重写历史能解决**——不能，而且这是实测不是论证：**`force-push` 不删除远端对象**。
+2026-08-27 在本仓测过：从一个全新空仓、只加 remote，按 **SHA** 去 fetch 四个已被取代的
+commit，**四个全部成功**，旧文件内容照样取得出来。所以重写之后，「人名没了」对**可达历史**
+为真、在**对象层**为假。⚠️ **再重写一次也没用**：那些旧 commit 早已不可达，
+而问题恰恰不是「不可达」，是「**仍被供应**」。
+
+**因此处置是**：① **本仓是内部工作仓，永不转 public**；
+② **任何公开发布都从一个全新仓推出，历史从第一个提交起就是干净的**，而不是重写本仓。
+
+**为什么这条反而更省**（值得写下来，因为看起来显然的做法正相反）：删仓重建**确实**能真删掉
+那些对象，但它需要仓主动手，而且不可逆。而「对外发布」**本来就**需要仓主动手一次。
+把那一次用在**建一个新仓**而不是**销毁旧仓**上，仓主的参与量不比原来多，
+且不可逆动作降到**零**。
+
+⚠️ **本条自身的边界**：这里说的是账号名册别名。本条**不是**在声称历史里没有别的东西——
+模式表结构上答不了「名册之外还有没有」，那正是人工复核存在的理由。
 
 ### Accepted residue — the internal system's name / 已接受的残留：那套内部系统的名字
 

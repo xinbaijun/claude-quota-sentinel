@@ -1142,6 +1142,29 @@ Extracted from a private in-house fleet-automation codebase at commit `e2f32279`
 Upstream changes after that commit are **not** tracked and **not** synced back.
 抽取自内部私有编队自动化代码库的 `e2f32279`；该 commit 之后的上游改动**不追平、不双向同步**。
 
+### 🔴 Note for maintainers — this repository is never made public
+### 🔴 维护者须知：本仓永不转 public
+
+**This repository must not be made public, and a history rewrite would not change that.**
+Its git objects contain real people's names, carried over from the baseline; the working
+tree is clean (0 occurrences) but the object layer is not (114 lines in historical versions
+of one test file), and **`force-push` does not delete remote objects** — measured on this
+repository, by fetching superseded commits by SHA from a fresh clone and getting the old
+contents back.
+
+⇒ **Any public release ships from a NEW repository whose history is clean from its first
+commit.** The full reasoning, the range-by-range counts, and why that path costs the owner
+*less* than deleting and recreating this one, are in
+[docs/REDACTION.md](docs/REDACTION.md#never-public--本仓永不转-public).
+
+**本仓不得转为 public，而且重写历史改变不了这一点。** 它的 git 对象里含从基线照抄过来的
+真实人名；工作树是干净的（0 处），但对象层不是（某个测试文件的历史版本里 114 行），
+而 **`force-push` 不删除远端对象**——本仓实测过：从全新 clone 按 SHA 去 fetch 已被取代的
+commit，旧内容照样取得出来。
+⇒ **任何公开发布都从一个全新仓推出，历史从第一个提交起就干净。**
+完整理由、分范围计数、以及为什么这条路比删仓重建让仓主**更省**，见
+[docs/REDACTION.md](docs/REDACTION.md#never-public--本仓永不转-public)。
+
 ### Note for maintainers — how to copy source files / 维护者须知：源文件怎么复制
 
 **Always extract with `git show e2f32279:<path>`. Never `cp` from a working tree.**
