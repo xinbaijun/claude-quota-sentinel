@@ -104,6 +104,16 @@ able to decide whether to trust it before you read anything else.
 | `$QS_STATE_DIR/quota-state.json` | write | the ledger: readings, guard fence, cadence / 台账：读数、守卫围栏、节奏 |
 | `$QS_STATE_DIR/switches.jsonl` | append | one line per switch decision, never rewritten / 每次切号决策一行，只追加不改写 |
 | `$QS_STATE_DIR/quota.log` | append | the human-readable log / 人读日志 |
+| `$QS_STATE_DIR/quota-panel-observations.jsonl` | append | one line per 10s screen sample: the parsed numbers, the account, the cadence, and a **sha256 of the visible screen**. ⚠️ The screen TEXT is stored only when you set `QUOTA_PANEL_TEXT_CAPTURE=1` — see **K15**. Pruned to 7 days / 每 10 秒一条：解析值、账号、节奏，以及**可见屏的 sha256**。⚠️ 屏幕**原文**只在你设了 `QUOTA_PANEL_TEXT_CAPTURE=1` 时才存，见 **K15**。保留 7 天 |
+| `$QS_STATE_DIR/quota-source-samples.jsonl` | append | one line per reading, structured fields only, never screen text / 每次读数一条，只有结构化字段，从不含屏幕原文 |
+
+⚠️ **That table is the set you should decide about, not the complete file listing.** The
+locks, the shadow-sampling state and event files, the cross-account snapshot and the
+statusline owner directory all live under `$QS_STATE_DIR` as well, all structured records.
+Nothing is written outside `$QS_STATE_DIR`, `~/.claude*` and `~/claude-backups`.
+⚠️ **上表是「你需要拿主意」的那几个，不是完整文件清单。** 各种锁、影子采样的 state 与事件
+文件、跨账号快照、statusline 归属目录也都在 `$QS_STATE_DIR` 下，都是结构化记录。
+`$QS_STATE_DIR`、`~/.claude*`、`~/claude-backups` 之外不写任何东西。
 
 🔴 **It also starts a process, and the table above is a file table — so read this line too.**
 `read-once`, `monitor-ensure` and `monitor-restart` will **create and keep** a tmux session
@@ -654,9 +664,34 @@ line reference is worse than none**.
   ⚠️ **买到什么要说准确**：`cmdline` 世界可读，`environ` **只同 UID 可读** ⇒ 准确说法是
   「**不再对任意用户可读**」，**不是**「地址不再暴露」。在一台你本来就是 root 的机器上，
   root 一直都读得到 `environ`。
+- **How concrete is this / 这有多具体** — ⚠️ not a theoretical exposure. Measured on the
+  host this repository was extracted from, 2026-08-31, on the **still-running** system it
+  came from: **5 live processes had a real account address in their `argv`**; that
+  machine's `/proc` is mounted **without `hidepid`**, so `/proc/<pid>/cmdline` is readable
+  by every local user; and the machine carries **6 other user accounts**, any one of which
+  sees those addresses with a plain `ps aux`. ⭐ The contrast that makes the remedy legible
+  is on the same machine: `/proc/<pid>/environ` is `-r--------`, **owner only**. Without
+  that second half a reader cannot tell why moving a value from one to the other helps.
+  ⚠️ **Scope of those numbers**: one machine, one instant, counted on the **still-running
+  system this was extracted from** — not on this repository's code, where the remedy above
+  is already in place. A different machine, a different `hidepid` setting, a different set
+  of live processes, and none of the three numbers is the same number. They answer "how
+  bad is this", not "what is this repo like now".
+  ⚠️ 不是理论上的暴露。2026-08-31 在本仓被抽取出来的那台宿主上实测：**5 个在跑进程的
+  `argv` 里有真实账号地址**；那台机器的 `/proc` **没有 `hidepid`** ⇒ `/proc/<pid>/cmdline`
+  对每个本地用户可读；机器上另有 **6 个用户账号**，其中任何一个 `ps aux` 就看得到。
+  ⭐ 让修法变得可读的对照就在同一台机器上：`/proc/<pid>/environ` 是 `-r--------`，
+  **仅属主**。没有这后半句，读者读不出「把值从前者挪到后者」为什么有效。
+  ⚠️ **口径**：那是**一台**机器、**那一个时刻**的计数，量的是**本仓被抽取出来的那套仍在跑的
+  系统**，不是本仓的代码——本仓这一条已经按上面的写法修好了。换一台机器、换一个 `hidepid`
+  设置、换一组在跑的进程，这三个数就都不是同一个数。它在这里回答的是「这有多严重」，
+  不是「本仓现在怎么样」。
 - **When you should not / 例外** — on a single-user machine this buys you very little, and
   `--arg` is more readable. Pay for it when the machine has other users, or other people's
   processes, that you would rather not hand a list of your account addresses to.
+  ⭐ The measurement above is what "the machine has other users" looks like when you
+  actually go and count instead of assuming.
+  ⭐ 上面那次实测，就是「这台机器上还有别的用户」在**真去数一遍**而不是想当然时的样子。
   单用户机器上这条买不到多少东西，而 `--arg` 更好读。值得买的前提是：这台机器上还有
   别的用户或别人的进程，而你不想把自己的账号地址清单送给他们。
 - ⚠️ **Two things this does not cover, stated rather than implied**: the static check
@@ -1048,6 +1083,61 @@ build one.
   documentation milestone.
   ⚠️ 本条**只记录**这个行为，**不改**它。启动路径该不该显式传环境属于改动在跑机制，
   **有意**留作公开未达项，而不是塞进一个文档里程碑里顺手改掉。
+
+### K15 · The debugging switch records the whole screen, not the panel
+### K15 · 调试开关记的是整张屏，不是那块面板
+
+- **When it bites / 什么条件下会坏** — you set `QUOTA_PANEL_TEXT_CAPTURE=1` to investigate
+  something and forget to set it back; or you point the monitor at a session that shows
+  anything besides `/usage`. Either way the sampler is `tmux capture-pane -p`, which
+  returns **the whole visible pane**, not the four lines it parses.
+  你为了查一件事设了 `QUOTA_PANEL_TEXT_CAPTURE=1`，然后忘了改回去；或者你让 monitor
+  盯着一个不止显示 `/usage` 的会话。两种情况下采样都是 `tmux capture-pane -p`，
+  它返回的是**整个可见 pane**，不是它要解析的那四行。
+- **What it looks like / 表现成什么样** — **nothing**. No error, no log line, no change in
+  behaviour. `quota-panel-observations.jsonl` just starts carrying, once every 10 seconds
+  for seven days, every visible line of that pane.
+  **什么都看不出来**：不报错、日志里没有一行、行为不变。只是
+  `quota-panel-observations.jsonl` 开始每 10 秒一条、留七天地装下那个 pane 上的每一行。
+- **How to tell it is this one / 怎么确认是不是这条** —
+  ```sh
+  jq -r 'select(.panel_text_captured) | .observed_at' \
+     "$QS_STATE_DIR/quota-panel-observations.jsonl" | tail -3
+  ```
+  Any output means capture was on for those records. Every record states which way it was
+  written, so a file with the switch flipped mid-run is still readable line by line.
+  有输出就说明那些记录是开着 capture 写的。每条记录都写明自己是按哪种方式写的，
+  所以开关中途翻过的文件仍然可以逐行读懂。
+- **What to do now / 现在怎么办** — set it back to `0` when the investigation window ends,
+  and lower `QUOTA_PANEL_RETENTION_SEC` while it is on. Two measurements, each with its
+  own scope, because the ratio depends on **your** pane: with capture **on**, on the
+  extraction host, 2026-08-31, 10s sampling, 7-day retention — 247 MB across 73,828
+  records ≈ 3.3 KB each; with the **default**, from a synthetic 7-line frame here — ≈ 0.56
+  KB each. ⇒ ≈ **6×** at that host's frame size. ⭐ Not "an order of magnitude": only the
+  `panel_text` part grows with your pane, so the multiple is whatever your pane is, and
+  the first number is one host with one configuration and one panel layout. Sample your
+  own file rather than assuming either transfers. The file is `0600`, but it is a plain
+  file: if you back up `$QS_STATE_DIR`, you back this up too.
+  查完就设回 `0`；开着的期间把 `QUOTA_PANEL_RETENTION_SEC` 调小。两个数、各带各的口径，
+  因为比例取决于**你的** pane：capture **开** —— 抽取宿主 2026-08-31 实测、10s 采样、
+  7 天保留：247 MB / 73,828 条 ≈ 每条 3.3 KB；**默认** —— 本仓用一帧 7 行的合成夹具实测
+  ≈ 每条 0.56 KB。⇒ 在那台宿主的帧尺寸下约 **6 倍**。⭐ 不是「一个数量级」：只有
+  `panel_text` 那部分随你的 pane 增长，倍数就是你的 pane 有多大；而前一个数是一台机器、
+  一套配置、一种面板排版。请量你自己那份文件，别假定其中任何一个对你也成立。
+  文件是 `0600`，但它就是个普通文件：你备份 `$QS_STATE_DIR`，就一起备份了它。
+- ⭐ **Why the default is off rather than "documented"** — this default decides what ends
+  up on **someone else's** disk. Here the monitored session only ever runs `/usage`, so
+  the frames only ever held quota numbers; that is a property of how **we** run it, not of
+  this tool, and it stops being true the moment anyone else installs it.
+  ⭐ **为什么是默认关，而不是「写进文档」** —— 这个默认值决定的是**别人**的磁盘上会留下
+  什么。在我们这边被监控的会话只跑 `/usage`，帧里只有额度数字；那是**我们**的用法的性质，
+  不是这个工具的性质，换一个人装上就不再成立。
+- ⚠️ **What the default still stores / 默认下仍然存的东西** — the sha256 of every frame is
+  always recorded. It does not let anyone read a screen back, but it does let someone who
+  can **guess** a screen confirm the guess. Stated because "we only store a hash" is
+  routinely read as "we store nothing".
+  每一帧的 sha256 一律记录。它不让任何人**读回**一张屏，但它让**猜得出**某张屏的人确认自己
+  猜对了。写出来是因为「我们只存了哈希」经常被读成「我们什么都没存」。
 
 ### K-gap · Guards that did not come across / 没有随抽取过来的守卫
 

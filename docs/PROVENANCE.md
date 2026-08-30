@@ -193,7 +193,7 @@ extracted together with the code on purpose.
 | `quota_usage_refresh_begin` | `e2f32279:scripts/sentinel-quota:2793-2822` |
 | `quota_usage_refresh_failure` | `e2f32279:scripts/sentinel-quota:2824-2851` |
 | `quota_panel_observations_prune_if_due` | `e2f32279:scripts/sentinel-quota:2853-2902` |
-| `quota_panel_log_observation` | `e2f32279:scripts/sentinel-quota:2904-2940` |
+| `quota_panel_log_observation` | `e2f32279:scripts/sentinel-quota:2904-2940` — 🔻 **rewritten**: the visible screen is no longer stored by default, and no longer travels on jq's command line; see the note at its definition / **重写**：可见屏原文默认不再落盘，也不再走 jq 命令行，见定义处 |
 | `quota_account_guard` | `e2f32279:scripts/sentinel-quota:2942-3049` |
 | `quota_monitor_owner_guard` | `e2f32279:scripts/sentinel-quota:3051-3088` |
 | `quota_monitor_bind_owner` | `e2f32279:scripts/sentinel-quota:3090-3129` |
@@ -399,6 +399,7 @@ them were carried across; the plumbing around them was replaced.
 | `:398–419` OAuth fallback gates | kept / 保留 |
 | `:493, 573` tool paths | → repo-relative / 改成仓内相对路径 |
 | `:588–600` paths | kept; re-rooted / 保留，改根 |
+| — no baseline counterpart / 无基线对应 | `QUOTA_PANEL_TEXT_CAPTURE`, **new here**, default `0`. The baseline had no switch because it always stored the raw screen. Why the default is off, and what it costs, is argued at the definition / **本处新增**，默认 `0`。基线没有这个开关，因为它一律存原文。默认关的理由与代价写在定义处 |
 | `:602–645` shadow sampling | kept, incident record and all / 保留，含事故记录 |
 | `:647–674` fallback UI regexes | kept verbatim / 原样保留 |
 | `:678–684` logging | kept, minus a soft hook into a supervising daemon that does not exist here / 保留，去掉软挂那个本仓不存在的监督 daemon 的分支 |
@@ -469,13 +470,16 @@ was extracted from.
 
 Three functions and one main flow could not come across unchanged, because their
 inputs do not exist outside the environment they were written in; one was rewritten
-because it hard-coded a single machine's time zone; and one was rewritten because the
-way it passed its arguments put an account address on a long-lived command line. Each
+because it hard-coded a single machine's time zone; one was rewritten because the
+way it passed its arguments put an account address on a long-lived command line; and one
+was rewritten because its default wrote the monitored session's entire visible screen to
+disk. Each
 carries a `🔻 REWRITTEN` note at its definition explaining what was removed and **what
 that costs** — the cost is stated rather than quietly dropped.
 三个函数和一段主流程无法原样过来，因为它们的输入在那套环境之外根本不存在；另有一个
 因为写死了某一台机器的时区而被重写；再有一个因为它传参的方式把账号地址放上了一条
-**长命**命令行而被重写。每一个的定义处都带着 `🔻 REWRITTEN` 注释，
+**长命**命令行而被重写；还有一个因为它的**默认值**会把被监控会话的整张可见屏写进磁盘
+而被重写。每一个的定义处都带着 `🔻 REWRITTEN` 注释，
 说明删掉了什么、**代价是什么**——代价是写出来的，不是悄悄丢掉的。
 
 > ⚠️ **`quota_cmd_status` 那一条是 m2 review 补上的**：它事实上被改写过（写死的 UTC+8 →
@@ -492,6 +496,7 @@ that costs** — the cost is stated rather than quietly dropped.
 | `account-probe` main flow | `claude-account-probe:294–379` | multi-account discovery (needs the switching tool) and the container liveness probe (needs Docker, and writes credential copies to disk) |
 | `quota_cmd_status` (`quota-sentinel`) | `sentinel-quota:4853–4936` | the fixed UTC+8 in the header line; plus the recent-switches list and the banner-sample line, which went with the features they belong to |
 | `quota_monitor_launch_command` (`lib/reading.sh`) | `sentinel-quota:991–1011` | nothing removed; the four ownership values moved from the `--settings` command line into a 0600 file. ⚠️ Not a feature cut — an exposure cut / 没删功能，删的是暴露面：归属四值从 `--settings` 命令行改走 0600 文件 |
+| `quota_panel_log_observation` (`lib/state.sh`) | `sentinel-quota:2904–2940` | nothing removed, one default reversed: the baseline stored `panel_text` (the whole visible pane) on every 10s sample; here that is behind `QUOTA_PANEL_TEXT_CAPTURE`, default off, and the frame moved off jq's `--arg` into the environment. ⚠️ Also an exposure cut, not a feature cut — the switch restores the old behaviour verbatim / 没删功能，反转的是一个默认值：基线每 10 秒把整张可见屏写进 `panel_text`，这里改由 `QUOTA_PANEL_TEXT_CAPTURE` 控制、默认关，且帧从 jq 的 `--arg` 改走环境变量。同样是删暴露面不是删功能——打开开关就原样回到旧行为 |
 
 ## Not extracted / 未抽取
 

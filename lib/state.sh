@@ -331,18 +331,74 @@ quota_panel_observations_prune_if_due() {
 # One line per screen sample. This file is raw evidence for investigating afterwards;
 # nothing here feeds a quota decision.
 # 每次画面采样都写一条；这份是调查原始证据，不参与额度决策。
+#
+# 🔻 REWRITTEN vs the baseline (`e2f32279:scripts/sentinel-quota:2904-2940`), in two ways,
+#    both about the frame and neither about what gets decided:
+#
+#    ① The baseline wrote `panel_text:$frame` unconditionally. Here the raw screen is
+#       stored only when QUOTA_PANEL_TEXT_CAPTURE=1, and every record carries
+#       `panel_text_captured` saying which way it was written. ⭐ The boolean is not
+#       decoration: toggle the switch mid-flight and the file ends up with both kinds of
+#       line, and "panel_text is absent" would otherwise be indistinguishable from "the
+#       screen was empty" or "this line was written by a broken build". A record has to
+#       say what it is.
+#       Why the frame is worth withholding, and what the default costs, is argued where
+#       the switch is defined (`lib/config.sh`). The short version: `capture-pane -p`
+#       returns the WHOLE pane, so this default decides what a stranger's disk ends up
+#       holding.
+#    ② The frame no longer travels on jq's command line. The baseline passed it as
+#       `--arg frame "$frame"`, which put the entire visible screen into that jq
+#       process's `/proc/<pid>/cmdline` — **world-readable**, on every 10s beat, whether
+#       or not anything was ever written to disk. It now travels in the environment
+#       (`$ENV.QS_JQ_FRAME`), which is readable only by the same UID. This is exactly the
+#       G-10 remedy applied to a second kind of value: G-10 moved the account ADDRESSES
+#       off command lines, and the screen those addresses appear on was still going past
+#       it. ⚠️ Same honest bound as G-10: "no longer readable by ANY user", not "no
+#       longer exposed" — root, and you, can still read `environ`.
+#
+#    ⚠️ `schema` deliberately stays 1. Bumping it would look like the tidy thing to do and
+#       would silently break retention: `quota_panel_observations_prune_if_due` only
+#       expires lines with `schema == 1`, so schema-2 lines would never be pruned and the
+#       file would grow without bound — the exact failure this change exists to avoid,
+#       reintroduced by the cosmetics of announcing it.
+#
+# 🔻 相对基线（`e2f32279:scripts/sentinel-quota:2904-2940`）**重写**了两处，都是关于「帧」
+#    的，都不影响决策：
+#
+#    ① 基线无条件写 `panel_text:$frame`。这里只有 QUOTA_PANEL_TEXT_CAPTURE=1 才存原文，
+#       且每条记录都带 `panel_text_captured` 说明自己是按哪种方式写的。⭐ 这个布尔不是
+#       装饰：开关中途一改，同一份文件里就会两种行并存，而「没有 panel_text」将无法与
+#       「当时屏是空的」「这行是某个坏版本写的」区分开。记录必须自己说明自己是什么。
+#       为什么值得不存、默认关的代价是什么，论证写在开关定义处（`lib/config.sh`）。
+#       一句话：`capture-pane -p` 返回的是**整个 pane**，所以这个默认值决定的是
+#       **一个陌生人的磁盘上会留下什么**。
+#    ② 帧不再走 jq 的命令行。基线用 `--arg frame "$frame"` 传，于是整张可见屏进了那个 jq
+#       进程的 `/proc/<pid>/cmdline`——**世界可读**，每 10 秒一拍，与「有没有落盘」无关。
+#       现在改走环境变量（`$ENV.QS_JQ_FRAME`），只有同 UID 读得到。这就是 G-10 那条修法
+#       用在第二类值上：G-10 把账号**地址**挪出了命令行，而**地址所在的那张屏**当时还在
+#       从它旁边走过去。⚠️ 边界与 G-10 一样诚实：是「**不再对任意用户可读**」，不是
+#       「不再暴露」——root 和你自己照样读得到 `environ`。
+#
+#    ⚠️ `schema` **刻意仍为 1**。跟着升到 2 看着才像做干净了，实际会无声地破坏保留策略：
+#       `quota_panel_observations_prune_if_due` 只让 `schema == 1` 的行到期，schema-2 的
+#       行将永远不被清理、文件无界增长——正是这次改动要避免的那个失败，被「宣布一下」这个
+#       动作本身重新引入。
 quota_panel_log_observation() (
   local observed="$1" email="$2" uuid="$3" mode="$4" status="$5" frame="$6"
-  local parsed="" five="" week="" five_reset="" week_reset="" sha event lock_fd
+  local parsed="" five="" week="" five_reset="" week_reset="" sha event lock_fd capture=0
+  [[ "${QUOTA_PANEL_TEXT_CAPTURE:-0}" == "1" ]] && capture=1
   if parsed=$(quota_panel_parse "$frame" 2>/dev/null); then
     five=$(quota_panel_field "$parsed" 1)
     week=$(quota_panel_field "$parsed" 2)
     five_reset=$(quota_panel_field "$parsed" 3)
     week_reset=$(quota_panel_field "$parsed" 4)
   fi
+  # `printf` is a bash builtin, so the frame never becomes any process's argv here; only
+  # sha256sum and awk fork, and they read stdin.
+  # `printf` 是 bash 内建，帧不会成为任何进程的 argv；fork 出去的 sha256sum 与 awk 读 stdin。
   sha=$(printf '%s' "$frame" | sha256sum | awk '{print $1}')
-  event=$(QS_JQ_EMAIL="$email" jq -cn --arg uuid "$uuid" --arg mode "$mode" \
-    --arg status "$status" --arg frame "$frame" --arg sha "$sha" \
+  event=$(QS_JQ_EMAIL="$email" QS_JQ_FRAME="$frame" jq -cn --arg uuid "$uuid" --arg mode "$mode" \
+    --arg status "$status" --arg sha "$sha" --argjson capture "$capture" \
     --arg five "$five" --arg week "$week" --arg five_reset "$five_reset" \
     --arg week_reset "$week_reset" --argjson observed "$observed" \
     --argjson local_interval "$QUOTA_POLL_INTERVAL" \
@@ -357,7 +413,8 @@ quota_panel_log_observation() (
                week_reset_text:(if $week_reset=="" then null else $week_reset end)},
        cadence:{local_sample_seconds:$local_interval,network_interval_seconds:$network_interval,
                 next_network_due:$next_due,refresh_seq:$refresh_seq},
-       panel_sha256:$sha,panel_text:$frame}') || return 0
+       panel_sha256:$sha,panel_text_captured:($capture==1)}
+      | if $capture==1 then .panel_text = $ENV.QS_JQ_FRAME else . end') || return 0
   mkdir -p "$(dirname "$QUOTA_PANEL_OBSERVATIONS_LOCK")" 2>/dev/null || return 0
   exec {lock_fd}> "$QUOTA_PANEL_OBSERVATIONS_LOCK" || return 0
   chmod 600 "$QUOTA_PANEL_OBSERVATIONS_LOCK" 2>/dev/null || true

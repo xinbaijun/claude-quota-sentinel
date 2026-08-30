@@ -124,6 +124,16 @@ QS_REAL_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/quota-sentinel"
 #    的证据。
 export TZ="${QS_TEST_TZ:-CST-8}"
 
+# ⚠️ Recorded BEFORE lib/config.sh is sourced, because afterwards the variable exists
+#    either way and "the default" and "what the operator exported" are indistinguishable.
+#    One group below asserts a DEFAULT (that the visible screen is not stored), so it has
+#    to be able to say "you are not testing the default" out loud instead of quietly
+#    testing something else.
+# ⚠️ 必须在 source lib/config.sh **之前**取：之后这个变量无论如何都存在，「默认值」与
+#    「跑测试的人 export 的值」就分不开了。下面有一组断言的是**默认行为**（可见屏不落盘），
+#    它必须能当场说「你测的不是默认值」，而不是安静地去测了别的东西。
+QS_TEST_PANEL_CAPTURE_PRESET="${QUOTA_PANEL_TEXT_CAPTURE+set}"
+
 QS_SOURCE="${QS_SOURCE:-$ROOT}"
 # shellcheck source=lib/config.sh
 source "$QS_SOURCE/lib/config.sh"   || { echo "cannot load lib/config.sh" >&2; exit 1; }
@@ -846,6 +856,49 @@ if [[ -n "$_aia_pc1" && -n "$_aia_pc2" ]]; then
   pass "正控：① 地址进 --arg 与 ② 地址插进 jq 程序文本，两种形态都抓得到"
 else
   fail "正控没红（①=[${_aia_pc1:-空}] ②=[${_aia_pc2:-空}]）：该形态上这条判据没有分辨力"
+fi
+
+# ── 静态面：整屏内容也不得进命令行 ──
+# 🔴 G-10 挪走的是账号**地址**；而**地址所在的那张屏**当时还在从旁边走过去。
+#    基线的 `quota_panel_log_observation` 用 `--arg frame "$frame"` 把 `capture-pane -p`
+#    抓来的**整个可见 pane** 交给 jq ⇒ 整屏内容躺在那个 jq 进程的 `/proc/<pid>/cmdline`
+#    里，**世界可读**，每 10 秒一拍，而且**与它最终有没有落盘无关**。
+#    ⭐ 这就是「只关掉落盘」的那个修法会留下的洞：磁盘干净了，命令行还在广播。
+# 🔴 G-10 moved the account ADDRESSES off command lines; the SCREEN those addresses appear
+#    on was still going past it. The baseline handed `capture-pane -p`'s whole visible
+#    pane to jq as `--arg frame "$frame"`, so the entire screen sat in that jq process's
+#    world-readable `/proc/<pid>/cmdline`, once every 10 seconds — and that happened
+#    whether or not anything was ever written to disk.
+#    ⭐ That is precisely the hole a disk-only fix would leave: a clean file, and a
+#      command line still broadcasting.
+# ⚠️ 口径与 `_addr_in_argv` 相同、局限也相同：按**变量名**认，认的是下面这张表。
+#    它答的是「已知持有整屏的变量有没有被放上命令行」，不答「argv 里有没有屏内容」。
+# ⚠️ Same scope and same limit as `_addr_in_argv`: it recognises BY VARIABLE NAME, from
+#    the table below. It answers "did a known screen-bearing variable get put on a command
+#    line", not "is there screen content in argv".
+_frame_in_argv() {
+  local dir="$1" f
+  local vars='frame|QUOTA_PANEL_FRAME_LAST'
+  for f in "$dir"/lib/*.sh "$dir/quota-sentinel" "$dir/account-probe"; do
+    [[ -f "$f" ]] || continue
+    awk -v F="$(basename "$f")" '!/^[[:space:]]*#/ { print F ":" NR ": " $0 }' "$f"
+  done | grep -E -- "--arg[a-z]* [A-Za-z_][A-Za-z0-9_]* \"\\$\{?($vars)[\":}]" \
+       | cut -c1-140 || true
+}
+_fia=$(_frame_in_argv "$QS_SOURCE")
+if [[ -z "$_fia" ]]; then
+  pass "没有整屏内容进 jq 命令行（帧改走 \$ENV.QS_JQ_FRAME）"
+else
+  fail "整屏内容又进了命令行：$(printf '%s' "$_fia" | tr '\n' '; ')"
+fi
+mkdir -p "$TMP/fia/lib"
+cp "$QS_SOURCE"/lib/*.sh "$TMP/fia/lib/"
+printf '\n_posctrl_frame() { jq -cn --arg f "$frame" %s; }\n' "'\$f'" >> "$TMP/fia/lib/detect.sh"
+_fia_pc=$(_frame_in_argv "$TMP/fia")
+if [[ -n "$_fia_pc" ]]; then
+  pass "正控：把帧放回 --arg 之后这条判据确实抓得到（它会红）"
+else
+  fail "正控没红：帧放回 --arg 也扫不出来，上面那条绿没有分辨力"
 fi
 
 echo "── 靠全局变量回传结果的函数，不许被命令替换调用 ──"
@@ -1691,16 +1744,64 @@ else
   fail "0% 无 reset 被误拒或 TAB 空列让周 reset 错归到五小时窗口"
 fi
 
+# ── 面板观测落盘：默认存 SHA + 结构化字段，整屏原文只在显式打开时才存 ──
+# WHY / 为什么是这个默认
+# --------------------------------------------------------------------------
+# The sampler reads with `tmux capture-pane -p`, which returns the WHOLE visible pane.
+# Storing that verbatim by default means whatever the monitored session happens to show
+# lands on disk every 10 seconds and stays a week. Here that session only ever runs
+# `/usage` — but that is how WE run it, and this file is the thing a stranger installs.
+# ⇒ default: sha256 + parsed fields; raw text behind QUOTA_PANEL_TEXT_CAPTURE.
+# 采样用 `tmux capture-pane -p`，返回的是**整个可见 pane**。默认原样落盘，意味着被监控
+# 会话上碰巧显示的任何东西每 10 秒进一次磁盘、留一周。在这里那个会话只跑 `/usage`——
+# 但那是**我们**的用法，而这份代码是陌生人装到自己机器上的东西。
+#
+# 🔴 两个方向都要，只做一个都不算数：
+#    默认关 → 原文不许出现；开关打开 → 原文必须原样回来。只测前者，一个「永远不存」的
+#    实现也全绿，而那不是这里要的东西——要的是「默认安全」，不是「功能被删掉」。
+# 🔴 BOTH directions, either alone is worthless: default off -> the text must not appear;
+#    switch on -> the text must come back verbatim. Testing only the first is also passed
+#    by an implementation that can never store it, which is not what is wanted here:
+#    the goal is a safe DEFAULT, not a removed feature.
+if [[ -n "$QS_TEST_PANEL_CAPTURE_PRESET" ]]; then
+  fail "环境里预置了 QUOTA_PANEL_TEXT_CAPTURE ⇒ 下面这组测的不是 lib/config.sh 里的默认值"
+fi
+
+# ⭐ A canary line that parses into NOTHING, so it cannot reach the file through any
+#    structured field. `has("panel_text")` answers "is that one key absent"; the canary
+#    answers "did any of this screen get out, through any route".
+# ⭐ 金丝雀行解析不出任何字段，所以它进不了任何结构化字段这条路。
+#    `has("panel_text")` 答的是「那一个键在不在」；金丝雀答的是「这一屏有没有从任何口子漏出去」。
+PANEL_CANARY='CANARY-whatever-else-was-on-this-screen-0d5f'
+PANEL_WITH_CANARY="$PANEL_OK"$'\n'"$PANEL_CANARY"
 rm -f "$QUOTA_PANEL_OBSERVATIONS"
-quota_panel_log_observation "$SCHED_NOW" 'sched@x' 'uuid-s' local_sample clean "$PANEL_OK"
-if jq -e --arg raw "$PANEL_OK" '
+quota_panel_log_observation "$SCHED_NOW" 'sched@x' 'uuid-s' local_sample clean "$PANEL_WITH_CANARY"
+if jq -e '
      .source=="usage_panel_screen" and .mode=="local_sample" and .status=="clean"
      and .account.email=="sched@x" and .cadence.local_sample_seconds==10
-     and .panel_text==$raw and (.panel_sha256|length)==64' \
-     "$QUOTA_PANEL_OBSERVATIONS" >/dev/null 2>&1; then
-  pass "每次本地采样保留账号、时刻、档位、解析值、SHA 与可见面板原文"
+     and .parsed.five_hour==12 and .parsed.seven_day==34
+     and (.panel_sha256|length)==64
+     and .panel_text_captured==false and (has("panel_text")|not)' \
+     "$QUOTA_PANEL_OBSERVATIONS" >/dev/null 2>&1 \
+   && ! grep -Fq -- "$PANEL_CANARY" "$QUOTA_PANEL_OBSERVATIONS"; then
+  pass "默认落盘：账号/时刻/档位/解析值/SHA 齐全，可见屏原文一个字都没进文件"
 else
-  fail "10s 面板观测日志缺原始画面或频率/账号字段"
+  fail "默认就把可见屏原文写进了观测文件：装这套的人屏幕上有什么就被存下什么"
+fi
+
+if (
+  QUOTA_PANEL_TEXT_CAPTURE=1
+  QUOTA_PANEL_OBSERVATIONS="$TMP/quota-panel-observations.optin.jsonl"
+  QUOTA_PANEL_PRUNE_STAMP="$TMP/quota-panel-observations.optin.prune-ts"
+  rm -f "$QUOTA_PANEL_OBSERVATIONS"
+  quota_panel_log_observation "$SCHED_NOW" 'sched@x' 'uuid-s' local_sample clean "$PANEL_WITH_CANARY"
+  jq -e --arg raw "$PANEL_WITH_CANARY" '
+     .panel_text==$raw and .panel_text_captured==true
+     and (.panel_sha256|length)==64' "$QUOTA_PANEL_OBSERVATIONS" >/dev/null 2>&1
+); then
+  pass "QUOTA_PANEL_TEXT_CAPTURE=1 时原文原样回来（调试开关是真开关，不是摆设）"
+else
+  fail "打开 QUOTA_PANEL_TEXT_CAPTURE 之后拿不回可见屏原文：这个逃生口是坏的"
 fi
 
 echo "── 原始整屏日志：滚动保留七天，低频清理且不误删坏行 ──"

@@ -468,19 +468,91 @@ QUOTA_SNAPSHOT_REFRESH_INTERVAL="${QUOTA_SNAPSHOT_REFRESH_INTERVAL:-}"  # if set
 QUOTA_STATE="${QUOTA_STATE:-$QS_STATE_DIR/quota-state.json}"
 QUOTA_LOG="${QUOTA_LOG:-$QS_STATE_DIR/quota.log}"
 QUOTA_LOCK_DIR="${QUOTA_LOCK_DIR:-$QS_STATE_DIR/lock}"
-# Every 10s local sample leaves a structured record; panel_text keeps the visible
-# screen as it was, which is what makes a cache/429 case traceable afterwards.
-# 每次 10s 本地采样都留结构化记录；panel_text 保存当时可见屏原文，便于追查缓存/429。
+# Every 10s local sample leaves one structured record here: the parsed percentages, the
+# account it belongs to, the cadence in force, and a sha256 of the visible screen.
+# ⚠️ The visible screen ITSELF is not stored by default — see QUOTA_PANEL_TEXT_CAPTURE.
+# 每次 10s 本地采样在这里留一条结构化记录：解析出的百分比、所属账号、当时的节奏，
+# 以及可见屏的 sha256。⚠️ **可见屏原文默认不存**，见下面的 QUOTA_PANEL_TEXT_CAPTURE。
 QUOTA_PANEL_OBSERVATIONS="${QUOTA_PANEL_OBSERVATIONS:-$QS_STATE_DIR/quota-panel-observations.jsonl}"
 QUOTA_PANEL_OBSERVATIONS_LOCK="${QUOTA_PANEL_OBSERVATIONS_LOCK:-$QS_STATE_DIR/quota-panel-observations.lock}"
-# Raw full screens are kept seven days; the structured source results and quota.log
+
+# 🔴 QUOTA_PANEL_TEXT_CAPTURE — off by default, and the default is the whole point.
+#
+# The sampler gets its numbers from `tmux capture-pane -p`, which returns **the entire
+# visible pane**, not the four lines it is about to parse. Writing that verbatim to disk
+# means the file contains whatever that session had on screen at the time. In the
+# environment this was extracted from the monitored session only ever runs `/usage`, so
+# the frames only ever held quota numbers — ⭐ but that is a property of **how we happen
+# to run it**, not of this tool. Point it at a session that shows anything else and that
+# is what gets recorded: every 10 seconds, kept for a week, in a file the person running
+# it has no particular reason to know exists.
+# ⇒ Default: the sha256 plus the parsed fields. The raw text is an explicit debugging
+#   opt-in, set to 1 for the window you are investigating and back to 0 afterwards.
+#
+# What the default COSTS you, stated rather than quietly dropped: after the fact you can
+# no longer answer "what did the screen actually look like at 03:14". You can still answer
+# "were these two frames identical" (the sha256 — and that is the question a stuck/cached
+# panel investigation actually turns on) and "which known-bad shape was it" (`status`).
+# What you lose is the unclassified shape: a frame nobody has written a detector for yet
+# is unrecoverable once the moment has passed.
+#
+# ⚠️ If you do turn it on, lower QUOTA_PANEL_RETENTION_SEC with it. Two measurements,
+#    each with its own scope, because the ratio between them depends on YOUR pane:
+#      · with capture ON, on the host this was extracted from, 2026-08-31, 10s sampling
+#        and the 7-day retention below: 247 MB across 73,828 records ≈ 3.3 KB per record;
+#      · with the default (capture OFF), from a synthetic 7-line frame here: ≈ 0.56 KB
+#        per record.
+#    ⇒ ≈ 6× at that host's frame size. ⭐ Not "an order of magnitude" — the multiple is
+#      whatever your pane is, since only the panel_text part grows with it. And the first
+#      number is one host, one configuration, one panel layout: sample your own file
+#      before assuming either transfers.
+#
+# 🔴 QUOTA_PANEL_TEXT_CAPTURE —— 默认关，而**默认值本身就是这条的全部意义**。
+#
+# 采样靠 `tmux capture-pane -p` 取数，它返回的是**整个可见 pane**，不是它接下来要解析的
+# 那四行。把它原样落盘，意味着磁盘上那份文件里装着当时那个会话屏幕上的任何东西。在本仓
+# 被抽取出来的那套环境里，被监控会话只跑 `/usage`，所以帧里只有额度数字——⭐ 但那是
+# **我们碰巧这么用**的性质，不是这个工具的性质。谁把它指向一个显示别的东西的会话，被记下
+# 来的就是别的东西：每 10 秒一次、留一周，写在一个他没什么理由知道其存在的文件里。
+# ⇒ 默认只存 sha256 与解析后的字段；原文改成显式的调试开关：排查期间置 1，查完置回 0。
+#
+# 默认关**的代价**（写出来，不是悄悄丢掉）：事后你回答不了「03:14 那一屏究竟长什么样」。
+# 你仍然回答得了「这两帧是不是同一帧」（靠 sha256——而「面板卡住/缓存」这类排查真正依赖的
+# 就是这一问）和「它是哪一种已知坏形态」（靠 `status`）。丢掉的是**尚未被分类的形态**：
+# 还没人给它写过检测器的那种帧，时刻一过就找不回来了。
+#
+# ⚠️ 真要打开，请连同 QUOTA_PANEL_RETENTION_SEC 一起调小。两个数，各带各的口径——
+#    因为两者的比例取决于**你的** pane：
+#      · capture **开**：本仓被抽取出来的那台宿主，2026-08-31，10s 采样、下面这个 7 天
+#        保留 —— 247 MB / 73,828 条 ≈ 每条 3.3 KB；
+#      · **默认**（capture 关）：本仓用一帧 7 行的合成夹具实测 ≈ 每条 0.56 KB。
+#    ⇒ 在那台宿主的帧尺寸下约 **6 倍**。⭐ 不是「一个数量级」——倍数就是你的 pane 有多大，
+#      因为只有 panel_text 那部分随它增长。而且前一个数是一台宿主、一套配置、一种面板排版：
+#      在假定其中任何一个对你也成立之前，先量一下你自己那份文件。
+QUOTA_PANEL_TEXT_CAPTURE="${QUOTA_PANEL_TEXT_CAPTURE:-0}"
+# Observations are kept seven days; the structured source results and quota.log
 # are unaffected. Pruning runs at most once a day, so the physical retention ceiling
 # is about eight days — this stops the 10s sampling cadence from repeatedly scanning
-# a file that reaches ~200MiB once mature.
+# a file that reaches ~200MiB once mature **with QUOTA_PANEL_TEXT_CAPTURE on**
+# (that is where the measured 247 MB / 73,828 records above comes from).
+# ⚠️ The seven days were deliberately NOT shortened when the capture default was turned
+# off, and the reason is worth writing down rather than re-deriving later: with the
+# default, 10s sampling produces ≈ 8,640 records/day × ≈ 0.56 KB ≈ 4.8 MB/day, so seven
+# days is ≈ 34 MB and the ~8-day physical ceiling is ≈ 41 MB. The structured record is
+# also the half that has downstream value (multi-source time alignment spans days).
+# ⇒ Shortening the window would give up the cheap, useful half to save nothing. Lower it
+#   for the window you have capture ON, not as a new default.
 # The stamp defaults to a path derived from the observations path, so that rebinding
 # the main file in a test or from outside does not touch the production sidecar.
-# 原始整屏只保留最近七天；结构化 source 结果与 quota.log 不受影响。清理每天最多一次，
-# 因此物理保留上界约八天，避免 10s 采样节奏反复扫描成熟后约 200MiB 的大文件。
+# 观测记录只保留最近七天；结构化 source 结果与 quota.log 不受影响。清理每天最多一次，
+# 因此物理保留上界约八天，避免 10s 采样节奏反复扫描成熟后约 200MiB 的大文件——
+# ⚠️ 那个 200MiB 是 **QUOTA_PANEL_TEXT_CAPTURE 打开时**的量级（即上面 247 MB / 73,828
+# 条那次实测）。
+# ⚠️ 把 capture 默认关掉时，这七天**刻意没有跟着调短**，理由写下来而不是留给以后重新推：
+# 默认下 10s 采样 ≈ 每天 8,640 条 × ≈ 0.56 KB ≈ 4.8 MB/天 ⇒ 七天 ≈ 34 MB，约八天的物理
+# 上界 ≈ 41 MB。而结构化记录恰好是**下游真正有用**的那一半（多来源按时间对齐要跨天）。
+# ⇒ 调短窗口等于放弃便宜又有用的那一半、却什么也没省下。要调，就调**你开着 capture 的
+#   那一段**，不要把它变成新的默认。
 # stamp 默认跟随 observations 路径派生，测试/外部重绑主文件时不会误碰生产 sidecar。
 QUOTA_PANEL_RETENTION_SEC="${QUOTA_PANEL_RETENTION_SEC:-604800}"
 QUOTA_PANEL_PRUNE_INTERVAL="${QUOTA_PANEL_PRUNE_INTERVAL:-86400}"

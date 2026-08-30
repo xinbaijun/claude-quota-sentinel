@@ -18,10 +18,10 @@ as "the other 43 were environment-specific" — and some of them were not. Every
 
 | disposition / 去向 | groups / 组数 | meaning |
 |---|---:|---|
-| 迁移 | 42 | migrated as-is / 照搬（可能只改了被测函数名或路径） |
+| 迁移 | 41 | migrated as-is / 照搬（可能只改了被测函数名或路径） |
 | 部分迁移 | 1 | partly migrated / 部分迁移 |
 | 拆半 | 1 | split, half migrated / 拆半 |
-| 改造 | 12 | adapted to this repo's shape / 按本仓形态改造 |
+| 改造 | 13 | adapted to this repo's shape / 按本仓形态改造 |
 | 删除 | 1 | deliberately deleted / 刻意删除 |
 | 排除·未抽取 | 15 | excluded: the code under test was not extracted / 排除：被测代码未抽取 |
 | 排除·可改造未做 | 10 | excluded: general invariant, convertible, NOT done / 排除：语义通用、可改造，本轮未做 |
@@ -84,7 +84,7 @@ at-most-once、先记账再做不可撤回动作、ABA 代际、状态机不得�
 | 33 | 1636 | 待投提速：手上有没投出去的复工消息就别按额度档位干等 | 排除·环境专有 | (a) pending 计数来自那套环境的账本 |
 | 34 | 1651 | 改名 vs 真换代：两件长得一样、后果完全相反的事必须分开 | 排除·环境专有 | (a) 会话档位后缀语义。丢失正控 P8 |
 | 35 | 1694 | 横幅提速信号：新鲜的真横幅才算，且只提速不决策 | 排除·环境专有 | (a) 数据源是那套环境的屏幕留档 |
-| 36 | 1731 | 0% inactive：无 Resets 可写 null，连续 TAB 不得把周 reset 错位 | 迁移 | 照搬 |
+| 36 | 1731 | 0% inactive：无 Resets 可写 null，连续 TAB 不得把周 reset 错位 | 改造 | 前半段（0%/无 reset 的解析与拒绝）照搬。后半段是上游那条面板观测断言，上游断言 `panel_text == 整屏原文`；本仓把「存整屏原文」从默认改成 `QUOTA_PANEL_TEXT_CAPTURE` 显式打开，所以该断言改造成**两条**：默认必须存不下原文（含一条解析不出任何字段的金丝雀行），开关打开必须原样拿回。⚠️ 只保留前一条不算迁移——一个「永远不存」的实现也会全绿。消融见 `posctrl.sh` 的 `panel-text-default-on` / `panel-text-unconditional` / `panel-text-optin-dead` |
 | 37 | 1756 | 原始整屏日志：滚动保留七天，低频清理且不误删坏行 | 迁移 | 照搬 |
 | 38 | 1837 | 陈旧帧：窗口身份优先，不能只看单调性 | 迁移 | 照搬 |
 | 39 | 1950 | reset 分钟抖动：同一窗口允许相差 5 分钟，不能颠倒新旧帧 | 迁移 | 照搬 |
