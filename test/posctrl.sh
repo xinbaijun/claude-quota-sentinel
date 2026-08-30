@@ -232,6 +232,63 @@ ablate config-symbol-missing \
   "set -u 下会当场退出" \
   m_drop lib/config.sh '^QUOTA_ACCOUNT_DRIFT_LOG_INTERVAL='
 
+# ⭐ 这一条守的是**长命进程**的 argv：statusLine 归属四值一旦改回位置参数，就会躺进
+#    monitor CLI 的 `--settings`，在整个会话期间对任意用户可读。消融手法就是把它改回去。
+# ⭐ This one guards a LONG-LIVED process argv: revert the statusLine ownership values to
+#    positional arguments and they land inside the monitor CLI `--settings`, readable by
+#    any user for the whole session. The ablation is exactly that reversion.
+# ⚠️ 用专用 mutator 而不是 m_sed：要替换的两行同时含 `$self` `%q` 与单双引号，
+#    从 shell 里传过去必然被展开或被截断。锚点写在 python 里就没有这一层。
+# ⚠️ A dedicated mutator, not m_sed: both lines contain `$self`, `%q` and mixed quotes,
+#    so passing them through the shell would expand or truncate them. Anchoring inside
+#    python removes that layer entirely.
+m_statusline_positional() {
+  python3 - "$C/lib/reading.sh" <<'MUT'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+a = '''  printf -v ingest '%q shadow-statusline-ingest --owner-file %q' "$self" "$owner_file"'''
+b = '''  printf -v ingest '%q shadow-statusline-ingest %q %q %q %q' \\
+    "$self" "$email" "$uuid" "$generation" "$launch_id"'''
+assert s.count(a) == 1, "anchor count %d" % s.count(a)
+open(p, "w", encoding="utf-8").write(s.replace(a, b))
+MUT
+}
+ablate statusline-addr-in-argv \
+  "monitor 启动命令不得带账号身份（长命进程 argv）" --all \
+  "启动命令仍带账号身份" \
+  m_statusline_positional
+
+# ── 账号地址不进 argv：三条，覆盖三种不同的坏法 ──────────────────────
+# ⭐ 消融动的是**触发条件**，不是守卫本身：把地址放回 --arg、把 env 前缀拿掉、
+#    把某个名字的前缀全删光 —— 三种真实的改坏方式，而不是「把检查删掉再看它不响」。
+# ⭐ Each ablation breaks the TRIGGERING CONDITION, not the guard: put an address back
+#    on --arg, drop one env prefix, delete every prefix for one name. Three ways this
+#    really breaks -- not "delete the check and observe that it stays quiet".
+ablate addr-back-in-argv \
+  "账号地址不得走 jq --arg（不进 jq 进程的命令行）" --fast \
+  "账号地址又进了 jq 命令行" \
+  m_append lib/detect.sh '_posctrl_addr() { jq -cn --arg e "$email" '"'"'$e'"'"'; }'
+
+# 🔴 这一条证明的是「静态检查够不到的那一格由行为断言接住」。掉一个前缀，jq 拿到 null
+#    而不是地址 ⇒ 点名的**行为**断言必须红。改动过程中这一格真的掉过两次，两次都是被
+#    它抓住的、没有任何静态检查抓到；本条把那条路固化成可复跑的消融。
+# 🔴 This proves the layer BELOW the static check. Drop one prefix and jq sees null
+#    instead of an address, so the NAMED behavioural assertion has to go red. That
+#    really happened twice while this change was made, caught by this and by no static
+#    check; this freezes the path.
+ablate argv-env-prefix-dropped \
+  "掉一个 env 前缀 → 地址变 null → 行为断言接住（静态检查够不到的那一格）" --fast \
+  "guard 后另读身份重新打开 TOCTOU" \
+  m_sed lib/state.sh \
+    'if ! QS_JQ_E="$email" quota_state_merge ' \
+    'if ! quota_state_merge '
+
+ablate env-pairing-broken \
+  "某个名字的 env 前缀被全删光 → 名字级配对判据必须红" --fast \
+  "jq env 传参配对断了" \
+  m_sed_all lib/state.sh 'QS_JQ_AE="$actual_email" ' ''
+
 ablate outparam-in-subshell \
   "靠全局回传的函数不许写在命令替换里（bash 语言陷阱）" --fast \
   "这些调用在子 shell 里跑" \
@@ -262,8 +319,8 @@ ablate switch-fence-not-moved \
   "切号成功后身份 fence 必须挪到新账号（否则永久 fail closed）" --slow \
   "下一拍守卫会判 account-drift" \
   m_sed lib/switch.sh \
-    '      .account_guard.expected_email = $e' \
-    '      .account_guard.expected_email_disabled_by_posctrl = $e'
+    '      .account_guard.expected_email = $ENV.QS_JQ_E' \
+    '      .account_guard.expected_email_disabled_by_posctrl = $ENV.QS_JQ_E'
 
 # ══ 10. candidate selection / 候选选择 ═══════════════════════════════════
 ablate roster-exclusion-off \

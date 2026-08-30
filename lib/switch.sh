@@ -39,10 +39,10 @@ quota_account_switch_record() {
   local ts="$1" from="$2" to="$3" kind="$4" note="${5:-}"
   quota_switch_ledger_ensure || { quota_log "⚠️ switch ledger directory unavailable: $QUOTA_SWITCH_LEDGER"; return 0; }
   local line
-  line=$(jq -cn \
-    --argjson ts "$ts" --arg from "$from" --arg to "$to" \
+  line=$(QS_JQ_FROM="$from" QS_JQ_TO="$to" jq -cn \
+    --argjson ts "$ts" \
     --arg kind "$kind" --arg note "$note" --arg mode "$QUOTA_SWITCH_MODE" \
-    '{ts:$ts, iso:($ts|todate), from:$from, to:$to, kind:$kind, mode:$mode, note:$note}' \
+    '{ts:$ts, iso:($ts|todate), from:$ENV.QS_JQ_FROM, to:$ENV.QS_JQ_TO, kind:$kind, mode:$mode, note:$note}' \
     2>/dev/null) || {
     # Losing the line is survivable; losing it SILENTLY is not. The append-failure path
     # below logs, and this one did not -- so a jq failure produced a decision that left
@@ -198,13 +198,13 @@ quota_switch_perform() {
     return 1
   fi
 
-  if ! quota_state_merge '
-      .account_guard.expected_email = $e
+  if ! QS_JQ_E="$to" quota_state_merge '
+      .account_guard.expected_email = $ENV.QS_JQ_E
       | .account_guard.expected_uuid = $u
       | .account_guard.established_ts = $t
       | .account_guard.last_ok_ts = $t
       | .last_switch_ts = $t' \
-      --arg e "$to" --arg u "$now_uuid" --argjson t "$now"; then
+      --arg u "$now_uuid" --argjson t "$now"; then
     quota_log "❌ the new identity was read back, but the guard fence could not be persisted -> not claiming success"
     return 1
   fi
@@ -220,8 +220,8 @@ quota_decide_once() {
   snap=$(quota_state_read 2>/dev/null || echo '{}')
   current=$(printf '%s' "$snap" | jq -r '.account // ""' 2>/dev/null)
   [[ -z "$current" ]] && return 0
-  five=$(printf '%s' "$snap" | jq -r --arg a "$current" '(.accounts[$a].five // empty)' 2>/dev/null)
-  week=$(printf '%s' "$snap" | jq -r --arg a "$current" '(.accounts[$a].week // empty)' 2>/dev/null)
+  five=$(printf '%s' "$snap" | QS_JQ_A="$current" jq -r '(.accounts[$ENV.QS_JQ_A].five // empty)' 2>/dev/null)
+  week=$(printf '%s' "$snap" | QS_JQ_A="$current" jq -r '(.accounts[$ENV.QS_JQ_A].week // empty)' 2>/dev/null)
   [[ -z "$five" || -z "$week" ]] && return 0
 
   # ── Fail closed on a stale ledger / 台账陈旧则不判 ──────────────────────
@@ -310,8 +310,9 @@ quota_decide_once() {
   quota_log "🔀 ${reason} -> switching ${current} -> ${target}"
   if quota_switch_perform "$target" "$now"; then
     quota_account_switch_record "$now" "$current" "$target" "auto" "$reason"
-    quota_state_merge '.last_switch_ts = $t | .account_guard.last_switch_recorded = $a' \
-      --argjson t "$now" --arg a "$target" || true
+    QS_JQ_A="$target" quota_state_merge \
+      '.last_switch_ts = $t | .account_guard.last_switch_recorded = $ENV.QS_JQ_A' \
+      --argjson t "$now" || true
     quota_log "✅ switched ${current} -> ${target}"
   else
     # A failed switch is still a ledger event. The credentials were restored by

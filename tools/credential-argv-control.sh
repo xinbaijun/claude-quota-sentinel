@@ -108,6 +108,31 @@ SH
 chmod +x "$SHIM/docker"
 export SPAWNLOG="$BOX/spawned-argv.log"; : > "$SPAWNLOG"
 
+# ── the exhaustive channel for jq / jq 的穷举通道 ────────────────────────────────────
+#
+# 🔴 Sampling `ps` can miss a process. `jq` calls are the shortest-lived things here --
+#    the sampler can run flat out and still never observe one. So `jq` is shimmed on PATH
+#    and every single invocation records its full argv. No gap, and no table of variable
+#    names: whatever reaches a jq command line lands in this log, whether or not anyone
+#    remembered to add the variable that carried it to a pattern list.
+# 🔴 采样 `ps` 会漏掉进程。这里最短命的就是 `jq` 调用——采样器全速跑也可能一次都没看见。
+#    所以给 `jq` 挂 PATH shim，**每一次**调用都把完整 argv 记下来。既没有采样间隙，
+#    也不依赖任何变量名表：**凡是上了 jq 命令行的东西都会落进这个日志**，不管有没有人
+#    记得把携带它的那个变量加进模式清单。
+# ⭐ 这一条与 test 里那条静态 `--arg` 判据**盲区不重叠**，是刻意的：静态那条按变量名认地址、
+#    看得见没跑到的代码；这条不认名字、但只看得见真跑到的路径。
+# ⭐ Deliberately non-overlapping blind spots with the static `--arg` check in the suite:
+#    that one knows names and sees code that never ran; this one knows no names but sees
+#    only paths that actually executed.
+export JQARGV="$BOX/jq-argv.log"; : > "$JQARGV"
+REAL_JQ="$(command -v jq)"
+cat > "$SHIM/jq" <<SH
+#!/usr/bin/env bash
+printf '%s\0' "\$@" >> "\$JQARGV"; printf '\n---JQ---\n' >> "\$JQARGV"
+exec "$REAL_JQ" "\$@"
+SH
+chmod +x "$SHIM/jq"
+
 # The switch binary is invoked by absolute path, so a PATH shim cannot intercept it.
 # Wrapping it via QUOTA_ACCOUNT_SWITCH_BIN records the exact invocation P1-3 was about,
 # exhaustively -- no sampling gap.
@@ -130,15 +155,48 @@ ST
 export ACCOUNT_SWITCH_ROOT_HOME="$BOX/home"
 export ACCOUNT_SWITCH_HOST_GLOBS="$BOX/src:$BOX/spare"
 
+# 🔴 驱动脚本落成文件，账号地址走 env 进去 —— **不能**写成 `bash -c "…alfa@example.invalid…"`。
+#    那样地址会进入 `bash` 自己的 argv，而 `ps` 采样器照单全收：实测一次跑出 425 次命中，
+#    再跑两次却是 0。⭐ 那不是被测代码在漏，是**脚手架在漏**，而且它漏得时有时无 ⇒
+#    这条断言会变成一条**忽绿忽红**的断言。恒红训练出「看到红也照过」，忽绿忽红训练出
+#    「再跑一次就好了」，两者一样有害。
+# 🔴 The driver is written to a FILE and addresses arrive through the environment -- NOT
+#    `bash -c "…alfa@example.invalid…"`, which would put the address into bash's own argv
+#    where the `ps` sampler picks it up: measured 425 hits on one run and 0 on the next two.
+#    ⭐ That is the SCAFFOLDING leaking, not the code under test, and it leaks
+#    intermittently -- which would make this assertion flap. A permanently red check
+#    teaches people to click past red; a flapping one teaches them to just run it again.
+cat > "$BOX/driver.sh" <<'DRV'
+cd "$QS_CTL_REPO" || exit 1
+source lib/config.sh && source lib/reading.sh && source lib/monitor.sh \
+  && source lib/detect.sh && source lib/state.sh && source lib/switch.sh
+now=$(date +%s)
+# 切号决策先跑：下面那几个读数层调用会改写台账水位，跑在前面会让切号条件不再成立。
+# The switch decision runs FIRST: the reading-layer calls below rewrite the ledger levels,
+# and running them first would stop the switch from being triggered at all.
+quota_decide_once "$now"
+# ⚠️ 地址落点大多在读数层与状态层，而**那些每一拍轮询都在跑**，切号只是偶发 ——
+#    只测切号会把持续暴露面整个测漏。
+# ⚠️ Most address sites are in the reading and state layers, and THOSE run on every poll
+#    while a switch is occasional -- measuring only the switch misses the continuous part.
+quota_reading_apply usage_panel "$now" "$QS_CTL_ACCT" 42 17 $((now+3600)) $((now+86400))
+quota_source_log_usage "$now" "$QS_CTL_ACCT" uuid-alfa 42 null 17 null
+quota_source_log_usage_failure "$now" "$QS_CTL_ACCT" uuid-alfa panel_unreadable
+quota_usage_refresh_begin "$now" "$QS_CTL_ACCT" uuid-alfa 4242 launch-x near
+quota_ratio_update "$now" "$QS_CTL_ACCT" 42 17
+quota_account_guard control-probe "$QS_CTL_ACCT"
+quota_monitor_launch_command "$QS_CTL_ACCT" uuid-alfa 4242 launch-x
+DRV
+
 : > "$SAMPLES"; sampler_start
 PATH="$SHIM:$PATH" QUOTA_STATE="$QS_STATE_DIR/quota-state.json" \
   QUOTA_SWITCH_LEDGER="$QS_STATE_DIR/switches.jsonl" QUOTA_SWITCH_MODE=on \
   QUOTA_ACCOUNT_SWITCH_BIN="$SHIM/switch-wrapper" \
   QUOTA_LOG_FILE="$QS_STATE_DIR/quota.log" \
-  bash -c "cd '$REPO'
-    source lib/config.sh && source lib/reading.sh && source lib/monitor.sh \
-      && source lib/detect.sh && source lib/state.sh && source lib/switch.sh
-    quota_decide_once \$(date +%s)" > "$BOX/run.out" 2> "$BOX/run.err"
+  QUOTA_SHADOW_ENABLED=1 \
+  QUOTA_SHADOW_STATUSLINE_OWNER_DIR="$QS_STATE_DIR/statusline-owner" \
+  QS_CTL_REPO="$REPO" QS_CTL_ACCT="alfa@example.invalid" \
+  bash "$BOX/driver.sh" > "$BOX/run.out" 2> "$BOX/run.err"
 sleep 0.3; sampler_stop
 
 switched=$(python3 -c "import json;print(json.load(open('$BOX/home/.claude.json'))['oauthAccount']['emailAddress'])" 2>/dev/null)
@@ -162,27 +220,47 @@ ck "$([ "$a_bin" -eq 0 ] && echo 1 || echo 0)" ADDR-BIN \
    "the switch binary is invoked with no address on its argv (selector via stdin)" \
    "sightings=$a_bin -- expected 0 since --use - reads the selector from stdin"
 
-# 🔴 The measurement is reported, NOT asserted, and the difference is deliberate.
+# ── the account ADDRESS, now asserted rather than reported ──────────────────────────
 #
-#    Account addresses DO still reach argv, from `jq --arg <address>` call sites spread
-#    across the reading and state layers (~17 of them). Those run on every poll, not
-#    only during a switch, so the exposure is continuous and long-standing -- it is not
-#    something this milestone introduced or can honestly claim to have removed.
-#    ⭐ Writing this as a pass/fail check would ship a check that cannot pass, and a
-#    check that is always red teaches people to click past red. So it is printed as a
-#    number with its cause named, and whoever decides to take it on gets a real starting
-#    point instead of a permanently failing assertion.
+# This block used to print a NOTE instead of a check, and the reason it gave was sound at
+# the time: account addresses really did still reach argv from `jq --arg <address>` call
+# sites in the reading and state layers, they ran on every poll, and shipping a check that
+# cannot pass teaches people to click past red. Those call sites are now gone -- the values
+# travel in the environment -- so the number has become a claim that can carry a check.
+# 这一格从前印的是 NOTE 而不是判据，当时的理由是成立的：账号地址确实仍从读数层与状态层的
+# `jq --arg <地址>` 进 argv、每一拍都在跑，而发布一条**永远不可能通过**的检查会训练出
+# 「看到红也照过」。那些落点现在没有了（值改走环境变量）⇒ 这个数字才配得上一条判据。
 #
-# 🔴 这一格是**报数**不是**判据**,区别是有意的。
-#    账号地址确实仍会进 argv,来源是散布在读数层与状态层的 `jq --arg <地址>`(约 17 处)。
-#    它们**每一拍轮询都在跑**,不只在切号期间 ⇒ 这是一条长期、持续的暴露面,
-#    不是本里程碑引入的,本里程碑也没有诚实地把它消掉。
-#    ⭐ 把它写成 pass/fail 就是发布一条**永远不可能通过**的判据,而恒红的检查训练出
-#    「看到红也照过」。所以印成一个带成因的数字,让接手的人拿到真起点而不是一条恒红断言。
+# 🔴 买到的是什么，说准确：`/proc/<pid>/cmdline` 世界可读，`/proc/<pid>/environ` 只同 UID
+#    可读 ⇒ 准确说法是「**不再对任意用户可读**」，**不是**「地址不再暴露」。在一台你本来
+#    就是 root 的机器上，root 一直都读得到 `environ`。
+# 🔴 State plainly what this buys: `/proc/<pid>/cmdline` is world-readable while
+#    `/proc/<pid>/environ` is readable only by the same UID. The accurate claim is
+#    "no longer readable by ANY user", NOT "the address is no longer exposed". On a box
+#    where you are root anyway, root could always read `environ`.
 a_ps=$(/usr/bin/grep -acE "$ADDR_RE" "$SAMPLES")
-printf 'NOTE  %-8s account addresses seen on command lines during the run: %s\n' "ADDR-PS" "$a_ps"
-printf '          cause: jq --arg <address> call sites in the reading/state layers, which\n'
-printf '          run every poll. Not switch-specific, not fixed here. See the report.\n'
+ck "$([ "$a_ps" -eq 0 ] && echo 1 || echo 0)" ADDR-PS \
+   "no account address on any sampled process command line" \
+   "sightings=$a_ps"
+
+a_jq=$(/usr/bin/grep -acE "$ADDR_RE" "$JQARGV")
+ck "$([ "$a_jq" -eq 0 ] && echo 1 || echo 0)" ADDR-JQ \
+   "no account address on any jq command line (exhaustive: every jq call was recorded)" \
+   "sightings=$a_jq"
+
+# 🔴 这一格必须在 ADDR-JQ 之后跑，且必须是**同一个日志、同一个模式**：它证明那个 0
+#    不是因为 shim 没挂上、日志没写、或模式匹配不到。没有它，「0 命中」与「压根没记」
+#    输出一模一样 —— 本文件开头那三格讲的就是这件事。
+# 🔴 Runs AFTER ADDR-JQ and against the SAME log with the SAME pattern: it proves the zero
+#    above is not "the shim never attached", "nothing was written", or "the pattern cannot
+#    match". Without it, "0 hits" and "we never recorded" produce identical output -- which
+#    is the point the three controls at the top of this file are making.
+jq_before=$(wc -c < "$JQARGV")
+PATH="$SHIM:$PATH" jq -n --arg x "canary@example.invalid" '$x' >/dev/null 2>&1
+jq_canary=$(/usr/bin/grep -acE "$ADDR_RE" "$JQARGV")
+ck "$([ "$jq_canary" -gt 0 ] && echo 1 || echo 0)" ADDR-JQ-SENS \
+   "a deliberate address on a jq command line IS recorded by the same channel" \
+   "canary sightings=$jq_canary (log grew from $jq_before bytes), expected >0 -- a 0 voids ADDR-JQ"
 
 echo "----"; echo "credential-argv-control: PASS=$pass FAIL=$fail"
 [ "$fail" -eq 0 ]

@@ -552,6 +552,17 @@ QUOTA_CREDENTIALS_FILE="${QUOTA_CREDENTIALS_FILE:-$HOME/.claude/.credentials.jso
 QUOTA_SHADOW_STATUSLINE_REFRESH="${QUOTA_SHADOW_STATUSLINE_REFRESH:-20}"
 QUOTA_SHADOW_STATUSLINE_STATE="${QUOTA_SHADOW_STATUSLINE_STATE:-$QS_STATE_DIR/quota-statusline-shadow-state.json}"
 QUOTA_SHADOW_STATUSLINE_EVENTS="${QUOTA_SHADOW_STATUSLINE_EVENTS:-$QS_STATE_DIR/quota-statusline-shadow-events.jsonl}"
+# Where the statusLine collector is told WHICH account/generation it belongs to.
+# It is a file rather than four command-line arguments for one reason: the arguments
+# would sit in the `--settings` JSON on the monitor CLI process, and that process lives
+# for the whole session -- so an account address would be readable in
+# `/proc/<pid>/cmdline` continuously, not for the microseconds a `jq` call lasts.
+# The launch id in the name is not sensitive; the file is written 0600.
+# statusLine 采集器从哪里得知「自己属于哪个账号/哪一代」。用文件而不是四个命令行参数，
+# 理由只有一个：那四个参数会待在 monitor CLI 进程的 `--settings` JSON 里，而那个进程
+# **活整个会话** ⇒ 账号地址会持续可从 `/proc/<pid>/cmdline` 读到，不是一次 jq 调用的
+# 那几微秒。文件名里的 launch id 不敏感；文件按 0600 写。
+QUOTA_SHADOW_STATUSLINE_OWNER_DIR="${QUOTA_SHADOW_STATUSLINE_OWNER_DIR:-$QS_STATE_DIR/statusline-owner}"
 QUOTA_SHADOW_STATUSLINE_LOCK="${QUOTA_SHADOW_STATUSLINE_LOCK:-$QS_STATE_DIR/quota-statusline-shadow.lock}"
 QUOTA_SHADOW_SCHEDULE_STATE="${QUOTA_SHADOW_SCHEDULE_STATE:-$QS_STATE_DIR/quota-shadow-schedule.json}"
 QUOTA_SHADOW_SCHEDULE_LOCK="${QUOTA_SHADOW_SCHEDULE_LOCK:-$QS_STATE_DIR/quota-shadow-schedule.lock}"

@@ -330,13 +330,14 @@ if (( WANT_SNAPSHOT )); then
   SNAPSHOT_PATH="${PROBE_SNAPSHOT:-$QUOTA_SNAPSHOT_FILE}"
   mkdir -p "$(dirname "$SNAPSHOT_PATH")" 2>/dev/null
   _snap_tmp=$(mktemp "${SNAPSHOT_PATH}.XXXXXX") || die "cannot create a temporary file"
-  printf '%b' "$rows" | jq -R -s \
-      --arg cur "$HOST_ACCOUNT" \
+  printf '%b' "$rows" \
+    | QS_JQ_CUR="$HOST_ACCOUNT" \
+      QS_JQ_RETIRED="${QUOTA_RETIRED_ACCOUNTS:-}" \
+      QS_JQ_PAUSED="${QUOTA_DISABLED_ACCOUNTS:-}" \
+      jq -R -s \
       --argjson now "$(date +%s)" \
       --argjson tzoff "$QUOTA_TZ_OFFSET_SEC" \
-      --arg tzlabel "$QUOTA_TZ_LABEL" \
-      --arg retired "${QUOTA_RETIRED_ACCOUNTS:-}" \
-      --arg paused "${QUOTA_DISABLED_ACCOUNTS:-}" '
+      --arg tzlabel "$QUOTA_TZ_LABEL" '
     # ⚠️ jq'"'"'s fromdate only accepts a strict "...Z". The server sends
     #    "2026-08-27T07:00:00.198232+00:00" — fractional seconds, and +00:00 rather
     #    than Z. Feeding that in **silently returns null** (no error), so the whole
@@ -349,15 +350,15 @@ if (( WANT_SNAPSHOT )); then
                      catch null) end;
     def localts: if . == null then null
                  else ((. + $tzoff) | strftime("%Y-%m-%d %H:%M:%S") + " " + $tzlabel) end;
-    ($retired | split(" ") | map(select(length>0))) as $R
-    | ($paused  | split(" ") | map(select(length>0))) as $P
+    ($ENV.QS_JQ_RETIRED | split(" ") | map(select(length>0))) as $R
+    | ($ENV.QS_JQ_PAUSED  | split(" ") | map(select(length>0))) as $P
     | { schema: 1,
         generated_at: $now,
         generated_at_local: (($now + $tzoff) | strftime("%Y-%m-%d %H:%M:%S") + " " + $tzlabel),
         generated_at_utc:   ($now | strftime("%Y-%m-%dT%H:%M:%SZ")),
         source: "oauth_api",
         note: "Each account is queried read-only against /api/oauth/usage with its own access token; nothing is refreshed and no credential is written. *_reset fields are epoch seconds; *_reset_local is the same instant rendered at the configured offset.",
-        current_account: $cur,
+        current_account: $ENV.QS_JQ_CUR,
         accounts: (
           split("\n") | map(select(length>0) | split("\t")
           | .[0] as $em
@@ -365,7 +366,7 @@ if (( WANT_SNAPSHOT )); then
               status: (if ($R | index($em)) then "retired"
                        elif ($P | index($em)) then "paused"
                        else "active" end),
-              is_current: ($em == $cur),
+              is_current: ($em == $ENV.QS_JQ_CUR),
               five_hour: (if .[2] == "-" then null else (.[2] | tonumber? // null) end),
               seven_day: (if .[3] == "-" then null else (.[3] | tonumber? // null) end),
               five_reset:  (.[4] | to_ep),
@@ -392,11 +393,11 @@ if (( WANT_SNAPSHOT )); then
 fi
 
 if (( WANT_JSON )); then
-  printf '%b' "$rows" | jq -R -s --arg cur "$HOST_ACCOUNT" '
+  printf '%b' "$rows" | QS_JQ_CUR="$HOST_ACCOUNT" jq -R -s '
     split("\n") | map(select(length>0) | split("\t")
     | {email:.[0], home:.[1], five_hour:.[2], seven_day:.[3],
        five_reset:.[4], week_reset:.[5], health:.[6], quota_note:.[7],
-       is_current:(.[0]==$cur)})'
+       is_current:(.[0]==$ENV.QS_JQ_CUR)})'
   exit 0
 fi
 

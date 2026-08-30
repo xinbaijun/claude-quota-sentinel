@@ -49,7 +49,17 @@ quota_reading_apply() {
 
   # 已存的观测不比这次旧就不写。两个上游各按自己节拍跑，迟到的包一定会出现；
   # 不挡住的话台账会在新旧值之间来回跳，切号判据跟着抖。
-  local stored; stored=$(quota_state_get ".accounts[\"$email\"].checked_ts" "")
+  # ⚠️ 这里**不能**用 `quota_state_get ".accounts[\"$email\"]…"`：那是把地址插进 jq 的
+  #    **程序文本**，于是它照样上了 jq 的命令行。⭐ 这一处是穷举通道抓出来的，静态那条
+  #    只认 `--arg` 的判据对它结构上是瞎的——「遍历到没到」与「模式集全不全」是两问。
+  # ⚠️ NOT `quota_state_get ".accounts[\"$email\"]…"`: that interpolates the address into
+  #    the jq PROGRAM TEXT, so it reaches the jq command line all the same. ⭐ This site was
+  #    found by the exhaustive channel; the static check that only knows `--arg` was
+  #    structurally blind to it. "Did the sweep reach it" and "is the pattern set complete"
+  #    are two different questions.
+  local stored
+  stored=$(quota_state_read 2>/dev/null \
+           | QS_JQ_E="$email" jq -r '.accounts[$ENV.QS_JQ_E].checked_ts // empty' 2>/dev/null)
   if [[ "$stored" =~ ^[0-9]+$ ]] && (( observed <= stored )); then
     return 2   # 2 = 有更新的数据在，本次不写（不是错误）
   fi
@@ -61,9 +71,9 @@ quota_reading_apply() {
 
   # 只有当前账号才动顶层决策字段。顶层 .five_hour 的语义是「**当前**账号还剩多少」，
   # 把别人的数写进去会直接按错误水位切号。
-  local expr='.accounts[$e] = ((.accounts[$e] // {}) + {five:$f, week:$w, checked_ts:$o, source:$s})
-              | .accounts[$e].five_reset = (if $fr == null then .accounts[$e].five_reset else $fr end)
-              | .accounts[$e].week_reset = (if $wr == null then .accounts[$e].week_reset else $wr end)'
+  local expr='.accounts[$ENV.QS_JQ_E] = ((.accounts[$ENV.QS_JQ_E] // {}) + {five:$f, week:$w, checked_ts:$o, source:$s})
+              | .accounts[$ENV.QS_JQ_E].five_reset = (if $fr == null then .accounts[$ENV.QS_JQ_E].five_reset else $fr end)
+              | .accounts[$ENV.QS_JQ_E].week_reset = (if $wr == null then .accounts[$ENV.QS_JQ_E].week_reset else $wr end)'
   if [[ -n "$cur" && "$cur" == "$email" ]]; then
     local top_ts; top_ts=$(quota_state_get '.fetched_ts' "")
     if [[ ! "$top_ts" =~ ^[0-9]+$ ]] || (( observed > top_ts )); then
@@ -71,7 +81,7 @@ quota_reading_apply() {
                   | .reading_source = \$s | .reading_source_ts = \$o"
     fi
   fi
-  quota_state_merge "$expr" --arg e "$email" --argjson f "$five" --argjson w "$week" \
+  QS_JQ_E="$email" quota_state_merge "$expr" --argjson f "$five" --argjson w "$week" \
     --argjson o "$observed" --arg s "$source" --argjson fr "$fr" --argjson wr "$wr" || return 1
   return 0
 }
@@ -103,11 +113,12 @@ quota_oauth_fallback_apply() {
   }
   [[ "$five" =~ ^[0-9]+$ && "$week" =~ ^[0-9]+$ ]] || return 1
   # ③ 落盘并标明来源
-  quota_state_merge '
+  QS_JQ_E="$em" quota_state_merge '
       .five_hour = $f | .seven_day = $w | .fetched_ts = $o
-      | .accounts[$e].five = $f | .accounts[$e].week = $w | .accounts[$e].checked_ts = $o
+      | .accounts[$ENV.QS_JQ_E].five = $f | .accounts[$ENV.QS_JQ_E].week = $w
+      | .accounts[$ENV.QS_JQ_E].checked_ts = $o
       | .reading_source = "oauth_fallback" | .reading_source_ts = $n' \
-    --argjson f "$five" --argjson w "$week" --argjson o "$obs" --argjson n "$now" --arg e "$em" \
+    --argjson f "$five" --argjson w "$week" --argjson o "$obs" --argjson n "$now" \
     || { quota_log "❌ OAuth fallback reading could not be persisted -> this round still counts as no reading"; return 1; }
   quota_log "🛟 panel unreadable -> using OAuth reading $em five=${five}% week=${week}% (sampled $(quota_fmt_ts "$obs"), ${age}s ago)"
   return 0
@@ -433,13 +444,13 @@ quota_source_log_usage() {
   cadence=$(quota_shadow_schedule "$observed" 2>/dev/null || echo '{}')
   source_interval=$(quota_state_get '.usage_refresh.interval_seconds' "$QUOTA_USAGE_INTERVAL_NEAR")
   [[ "$source_interval" =~ ^[0-9]+$ ]] || source_interval=$QUOTA_USAGE_INTERVAL_NEAR
-  event=$(jq -cn --arg email "$email" --arg uuid "$uuid" \
+  event=$(QS_JQ_EMAIL="$email" jq -cn --arg uuid "$uuid" \
     --argjson observed "$observed" --argjson five "$five" \
     --argjson five_reset "${five_reset:-null}" --argjson week "$week" \
     --argjson week_reset "${week_reset:-null}" --argjson cadence "$cadence" \
     --argjson source_interval "$source_interval" '
       {schema:1,source:"usage_panel",mode:"primary",decision_eligible:true,outcome:"ok",
-       observed_at:$observed,account:{email:$email,uuid:$uuid},
+       observed_at:$observed,account:{email:$ENV.QS_JQ_EMAIL,uuid:$uuid},
        windows:{five_hour:{period_seconds:18000,used_percentage:$five,resets_at:$five_reset},
                 seven_day:{period_seconds:604800,used_percentage:$week,resets_at:$week_reset}},
        cadence:($cadence + {source_interval_seconds:$source_interval})}') || return 0
@@ -452,11 +463,11 @@ quota_source_log_usage_failure() {
   cadence=$(quota_shadow_schedule "$observed" 2>/dev/null || echo '{}')
   source_interval=$(quota_state_get '.usage_refresh.interval_seconds' "$QUOTA_USAGE_INTERVAL_NEAR")
   [[ "$source_interval" =~ ^[0-9]+$ ]] || source_interval=$QUOTA_USAGE_INTERVAL_NEAR
-  event=$(jq -cn --arg email "$email" --arg uuid "$uuid" --arg outcome "$outcome" \
+  event=$(QS_JQ_EMAIL="$email" jq -cn --arg uuid "$uuid" --arg outcome "$outcome" \
     --argjson observed "$observed" --argjson cadence "$cadence" \
     --argjson source_interval "$source_interval" '
       {schema:1,source:"usage_panel",mode:"primary",decision_eligible:false,
-       outcome:$outcome,observed_at:$observed,account:{email:$email,uuid:$uuid},
+       outcome:$outcome,observed_at:$observed,account:{email:$ENV.QS_JQ_EMAIL,uuid:$uuid},
        windows:null,cadence:($cadence + {source_interval_seconds:$source_interval})}') || return 0
   quota_source_append "$event" || true
 }
@@ -464,8 +475,24 @@ quota_source_log_usage_failure() {
 # statusLine command 的 stdin 是 Claude Code 官方提供的会话 JSON。这个入口只接受
 # monitor 启动时固化的账号/UUID/代际，并再次核验主状态、活 tmux 与当前凭据；任一项
 # 不同都静默丢帧，挡住切号中途的旧 monitor 和“同名会话重建”ABA。
+# ⚠️ 只接受 `--owner-file <path>`，**故意不保留**「四个位置参数」那种调用方式。
+#    留着它就等于留着一条把账号地址放上命令行的合法路径，而这个子命令正是被 Claude Code
+#    每 20 秒调起来一次的那个 —— 留一条后门，它就会被每 20 秒走一次。
+# ⚠️ Only `--owner-file <path>` is accepted; the four-positional-argument form is
+#    deliberately NOT kept. Keeping it would keep a supported way to put an account
+#    address on a command line -- and this subcommand is the one Claude Code invokes every
+#    20 seconds, so a back door here is a back door taken every 20 seconds.
 quota_shadow_statusline_ingest() (
-  local expected_email="${1:-}" expected_uuid="${2:-}" expected_gen="${3:-}" expected_launch="${4:-}"
+  local owner_file="" expected_email="" expected_uuid="" expected_gen="" expected_launch=""
+  while (( $# )); do
+    case "$1" in
+      --owner-file) owner_file="${2:-}"; shift 2 || return 0 ;;
+      *) return 0 ;;
+    esac
+  done
+  local _own
+  _own=$(quota_statusline_owner_read "$owner_file" 2>/dev/null) || return 0
+  IFS=$'\037' read -r expected_email expected_uuid expected_gen expected_launch <<< "$_own"
   local payload state owner owner_uuid owner_gen owner_launch live_gen live_launch
   local identity actual_email="" actual_uuid="" usage_uuid=""
   local normalized now shadow lock_fd next_due event next_state cadence interval outcome windows
@@ -531,29 +558,29 @@ quota_shadow_statusline_ingest() (
     outcome="missing_rate_limits"
   fi
   windows=$(printf '%s' "$normalized" | jq -c '.windows' 2>/dev/null || echo null)
-  event=$(printf '%s' "$normalized" | jq -c \
-    --arg email "$expected_email" --arg uuid "$expected_uuid" \
+  event=$(printf '%s' "$normalized" | QS_JQ_EMAIL="$expected_email" jq -c \
+    --arg uuid "$expected_uuid" \
     --arg monitor "$QUOTA_MONITOR_SESSION" --arg generation "$expected_gen" \
     --arg launch "$expected_launch" \
     --arg outcome "$outcome" --argjson observed "$now" --argjson next "$(( now + interval ))" \
     --argjson cadence "$cadence" '
       {schema:1, source:"statusline", mode:"shadow", decision_eligible:false,
        observed_at:$observed, outcome:$outcome, next_due:$next,
-       account:{email:$email, uuid:$uuid},
+       account:{email:$ENV.QS_JQ_EMAIL, uuid:$uuid},
        monitor:{session:$monitor, generation:$generation, launch_id:$launch},
        claude:{session_id:.session_id, version:.version},
        windows:.windows,
        cadence:$cadence,
        freshness:{kind:"collector_observed", server_fetched_at:null,
                   note:"statusLine may replay its last known rate_limits"}}' 2>/dev/null) || return 0
-  next_state=$(jq -cn --arg email "$expected_email" --arg uuid "$expected_uuid" \
+  next_state=$(QS_JQ_EMAIL="$expected_email" jq -cn --arg uuid "$expected_uuid" \
     --arg generation "$expected_gen" --arg launch "$expected_launch" \
     --arg outcome "$outcome" --argjson now "$now" \
     --argjson next "$(( now + interval ))" --argjson cadence "$cadence" \
     --argjson windows "$windows" '
       {schema:1, mode:"shadow", decision_eligible:false, last_write:$now,
        next_due:$next, last_outcome:$outcome, last_windows:$windows,
-       account:{email:$email,uuid:$uuid}, monitor_generation:$generation,
+       account:{email:$ENV.QS_JQ_EMAIL,uuid:$uuid}, monitor_generation:$generation,
        monitor_launch_id:$launch,
        cadence:$cadence}' 2>/dev/null) || return 0
   quota_shadow_append_event "$QUOTA_SHADOW_STATUSLINE_EVENTS" "$event" || true
@@ -562,11 +589,31 @@ quota_shadow_statusline_ingest() (
   return 0
 )
 
-# 构造专用 monitor 的命令。--settings 是仅此进程的 overlay，不改用户全局 settings；
-# command 参数全部 shell quote，email/UUID 即使含特殊字符也不会变成命令片段。
+# 构造专用 monitor 的命令。--settings 是仅此进程的 overlay，不改用户全局 settings。
+#
+# 🔴 归属那四个值（账号、UUID、代际、launch id）**走文件，不走命令行**。
+#    它们曾经是四个位置参数，于是躺在 `--settings` 的 JSON 里，而那串 JSON 是
+#    monitor CLI 进程 argv 的一部分 ⇒ 一个账号地址在**整个会话期间**都能被任意用户
+#    从 `/proc/<pid>/cmdline` 读到。⭐ 这和 `jq --arg` 那一类不是一个量级：
+#    jq 调用只活几微秒，这个活到会话结束。命令行上现在只剩一个不敏感的文件路径。
+# 🔴 The ownership values (account, uuid, generation, launch id) travel in a FILE, not on
+#    the command line. As four positional arguments they sat inside the `--settings` JSON,
+#    which is part of the monitor CLI process argv -- so an account address was readable
+#    by ANY user from `/proc/<pid>/cmdline` for the WHOLE session. ⭐ Not the same order of
+#    magnitude as the `jq --arg` sites: a jq call lives microseconds, this lives until the
+#    session ends. Only a non-sensitive path is left on the command line.
+#
+# ⚠️ 写文件前先把该目录下其他 owner 文件删掉，两个理由，第二个才是要紧的：
+#    ① 不留「只增不减」的凭据相关文件（本项目对这种默认值有明确立场）；
+#    ② **上一代 CLI 的 owner 文件被删掉，正是我们要的**——它的采集器读不到归属就直接
+#       返回，等于把旧代际挡在门外，与原来「值对不上所以自我拒绝」是同一个结果。
+# ⚠️ Other owner files are removed first. Two reasons, and the second is the load-bearing
+#    one: ① nothing credential-adjacent should be append-only here; ② deleting the PREVIOUS
+#    generation file is exactly what we want -- its collector then reads no ownership and
+#    returns, which fences out the stale generation just as the old value-mismatch did.
 quota_monitor_launch_command() {
   local email="${1:-}" uuid="${2:-}" generation="${3:-}" launch_id="${4:-}"
-  local self ingest settings quoted refresh
+  local self ingest settings quoted refresh owner_file
   if [[ "$QUOTA_SHADOW_ENABLED" != "1" || -z "$email" || -z "$uuid" \
      || -z "$generation" || -z "$launch_id" ]]; then
     printf '%s' "$QUOTA_MONITOR_LAUNCH"
@@ -575,13 +622,54 @@ quota_monitor_launch_command() {
   refresh="$QUOTA_SHADOW_STATUSLINE_REFRESH"
   [[ "$refresh" =~ ^[0-9]+$ ]] && (( refresh >= 1 )) || refresh=20
   self=$(readlink -f "${BASH_SOURCE[0]}")
-  printf -v ingest '%q shadow-statusline-ingest %q %q %q %q' \
-    "$self" "$email" "$uuid" "$generation" "$launch_id"
+  # ⚠️ 落不下这个文件就退回「不带 statusLine 的启动命令」，与 shadow 关闭时同一条路。
+  #    宁可少一个影子读数源，也不要把地址放回命令行换取它。
+  # ⚠️ If the file cannot be written, fall back to the launch command WITHOUT statusLine --
+  #    the same path as shadow being disabled. Better to lose a shadow reading source than
+  #    to buy it back by putting the address on a command line again.
+  quota_statusline_owner_write "$email" "$uuid" "$generation" "$launch_id" || {
+    printf '%s' "$QUOTA_MONITOR_LAUNCH"; return 0; }
+  owner_file="$QUOTA_SHADOW_STATUSLINE_OWNER_DIR/$launch_id.json"
+  printf -v ingest '%q shadow-statusline-ingest --owner-file %q' "$self" "$owner_file"
   settings=$(jq -cn --arg command "$ingest" --argjson refresh "$refresh" \
     '{statusLine:{type:"command",command:$command,padding:0,refreshInterval:$refresh}}') || {
       printf '%s' "$QUOTA_MONITOR_LAUNCH"; return 0; }
   printf -v quoted '%q' "$settings"
   printf '%s --settings %s' "$QUOTA_MONITOR_LAUNCH" "$quoted"
+}
+
+# 写归属文件（0600），并清掉同目录下其余 owner 文件。返回非 0 表示没写成。
+# Write the ownership file (0600) and remove every other owner file in that directory.
+quota_statusline_owner_write() {
+  local email="$1" uuid="$2" generation="$3" launch_id="$4" dir tmp f
+  dir="$QUOTA_SHADOW_STATUSLINE_OWNER_DIR"
+  mkdir -p "$dir" 2>/dev/null || return 1
+  chmod 700 "$dir" 2>/dev/null || true
+  for f in "$dir"/*.json; do
+    [[ -e "$f" ]] || continue
+    [[ "$(basename "$f")" == "$launch_id.json" ]] || rm -f "$f" 2>/dev/null
+  done
+  tmp=$(mktemp "$dir/.owner.XXXXXX") || return 1
+  chmod 600 "$tmp" 2>/dev/null || true
+  if ! QS_JQ_EMAIL="$email" QS_JQ_UUID="$uuid" jq -cn \
+        --arg generation "$generation" --arg launch "$launch_id" \
+        '{account:$ENV.QS_JQ_EMAIL, uuid:$ENV.QS_JQ_UUID,
+          generation:$generation, launch_id:$launch}' > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"; return 1
+  fi
+  mv -f "$tmp" "$dir/$launch_id.json" || { rm -f "$tmp"; return 1; }
+  return 0
+}
+
+# 读归属文件，用 \037 分隔回吐四个值。文件不存在/不完整都返回非 0。
+# Read the ownership file back, emitting the four values separated by \037.
+quota_statusline_owner_read() {
+  local file="$1" out
+  [[ -n "$file" && -s "$file" ]] || return 1
+  out=$(jq -r '[.account//"", .uuid//"", .generation//"", .launch_id//""] | join("\u001f")' \
+        "$file" 2>/dev/null) || return 1
+  [[ -n "$out" ]] || return 1
+  printf '%s' "$out"
 }
 
 # 生产实现从凭据文件取 accessToken，但 header 经匿名 pipe fd 交给 curl；token 不进入
@@ -819,15 +907,16 @@ quota_shadow_oauth_sample() (
   fi
   next_due=$(( received + delay ))
   if [[ "$http" =~ ^[0-9]{3}$ ]]; then http_json=$((10#$http)); else http_json=null; fi
-  event=$(jq -cn --arg outcome "$outcome" --arg email "$before_email" --arg uuid "$before_uuid" \
-    --arg after_email "$after_email" --arg after_uuid "$after_uuid" \
+  event=$(QS_JQ_EMAIL="$before_email" QS_JQ_AFTER_EMAIL="$after_email" \
+    jq -cn --arg outcome "$outcome" --arg uuid "$before_uuid" \
+    --arg after_uuid "$after_uuid" \
     --argjson attempted "$now" --argjson observed "$received" --argjson latency "$latency_ms" \
     --argjson status "$http_json" --argjson next "$next_due" --argjson windows "$windows" \
     --argjson cadence "$cadence" --argjson adaptive_interval "$penalty_interval" '
       {schema:1, source:"oauth_api", mode:"shadow", decision_eligible:false,
        attempted_at:$attempted, observed_at:$observed, latency_ms:$latency,
-       account:{email:$email,uuid:$uuid},
-       identity_after:{email:$after_email,uuid:$after_uuid},
+       account:{email:$ENV.QS_JQ_EMAIL,uuid:$uuid},
+       identity_after:{email:$ENV.QS_JQ_AFTER_EMAIL,uuid:$after_uuid},
        http_status:$status, outcome:$outcome, next_due:$next,
        windows:$windows, cadence:$cadence,
        adaptive_interval_seconds:(if $adaptive_interval > 0 then $adaptive_interval else null end)}' 2>/dev/null) || event=''

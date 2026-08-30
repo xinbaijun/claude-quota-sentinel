@@ -790,12 +790,12 @@ quota_monitor_stale_recovery_claim() {
   last=$(quota_state_get '.monitor_recovery.last_restart_ts' 0)
   [[ "$last" =~ ^[0-9]+$ ]] || last=0
   (( now - last >= cooldown )) || return 1
-  quota_state_merge '
+  QS_JQ_E="$email" quota_state_merge '
       .monitor_recovery = {
-        last_restart_ts:$t, reason:"stale_frame", account:$e,
+        last_restart_ts:$t, reason:"stale_frame", account:$ENV.QS_JQ_E,
         observed:{five:$five, week:$week, five_reset:$fr, week_reset:$wr}
       }' \
-    --argjson t "$now" --arg e "$email" --argjson five "$five" --argjson week "$week" \
+    --argjson t "$now" --argjson five "$five" --argjson week "$week" \
     --arg fr "$five_reset" --arg wr "$week_reset"
 }
 

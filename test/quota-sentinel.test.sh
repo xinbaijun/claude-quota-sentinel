@@ -563,6 +563,16 @@ _undefined_reads() {
   # ⚠️ 这是静态检查，且把话说明白：拼接出来的名字（`${prefix}_SUFFIX`）看不见，不跟
   #    `eval`，只要**任一**文件赋过值就算已定义。它答的是「这个符号有没有定义」，
   #    不是「每条分支都安全」。
+  # ⚠️ `R`, `P` and `ENV` in the exclusion list below are NOT bash variables: they
+  #    are jq program text (`as $R`, `as $P`, and jq's builtin `$ENV`) that this
+  #    grep-based scanner cannot tell apart from a shell expansion. Excluding a name
+  #    costs coverage, so `ENV` does not get excluded for free -- the check immediately
+  #    below ("jq env-passing") re-establishes, in both directions, exactly the property
+  #    that `--arg` used to give for the values now passed through `$ENV`.
+  # ⚠️ 下面排除列表里的 `R`/`P`/`ENV` 都不是 bash 变量，而是 jq 程序文本
+  #    （`as $R`、`as $P`、以及 jq 内建的 `$ENV`），而这个基于 grep 的扫描器分不出
+  #    它们和 shell 展开的区别。**排掉一个名字就是丢掉一块覆盖面**，所以 `ENV` 不是白排的：
+  #    紧跟着的「jq env 传参」那条判据会**双向**把 `--arg` 原本给的那个性质重新立起来。
   local reads assigned
   # ⚠️ Two shapes, and the second is the one that matters here: inside `(( ... ))`
   #    bash reads a variable with **no `$` sigil**, and that is exactly how the missing
@@ -579,7 +589,7 @@ _undefined_reads() {
                 grep -ohE '\$\{[A-Z][A-Z0-9_]*:[-?=+]' "$@" | grep -oE '[A-Z][A-Z0-9_]*'
               } | sort -u)
   comm -23 <(printf '%s\n' "$reads") <(printf '%s\n' "$assigned") \
-    | grep -vxE 'HOME|PATH|TMPDIR|PWD|SHELL|TERM|LANG|LC_ALL|TZ|IFS|RANDOM|UID|EUID|HOSTNAME|SECONDS|LINENO|COLUMNS|LINES|OSTYPE|FUNCNAME|BASH_SOURCE|BASH_REMATCH|XDG_STATE_HOME|HTTPS_PROXY|HTTP_PROXY|NO_PROXY|ALL_PROXY|R|P' \
+    | grep -vxE 'HOME|PATH|TMPDIR|PWD|SHELL|TERM|LANG|LC_ALL|TZ|IFS|RANDOM|UID|EUID|HOSTNAME|SECONDS|LINENO|COLUMNS|LINES|OSTYPE|FUNCNAME|BASH_SOURCE|BASH_REMATCH|XDG_STATE_HOME|HTTPS_PROXY|HTTP_PROXY|NO_PROXY|ALL_PROXY|R|P|ENV' \
     || true
 }
 # ⚠️ `account-probe` belongs in this list: it is bash, it sets its own `set -uo pipefail`,
@@ -610,6 +620,154 @@ else
   fail "正控没红：这个检查抓不到「读了没定义」，上面那条绿是没有分辨力的绿"
 fi
 
+
+echo "── jq env 传参：账号地址不进命令行，且两侧必须配对 ──"
+# WHY / 为什么有这一组
+# --------------------------------------------------------------------------
+# An account address handed to jq as `--arg e "$email"` is on that jq process's command
+# line, and `/proc/<pid>/cmdline` is world-readable. The reading loop runs these on every
+# beat, so the exposure was continuous rather than switch-only. The values now travel in
+# the environment instead (`QS_JQ_E="$email" jq … '$ENV.QS_JQ_E'`), because
+# `/proc/<pid>/environ` is readable only by the same UID.
+# ⭐ What this buys is narrower than it sounds and the README says so: on a box where you
+#    are root anyway, root could always read `environ`. The honest claim is
+#    "no longer readable by ANY user", not "the address is no longer exposed".
+# 把账号地址用 `--arg e "$email"` 交给 jq，它就在那个 jq 进程的命令行上，而
+# `/proc/<pid>/cmdline` 是世界可读的。读数主轮**每一拍**都在跑这些 ⇒ 暴露是持续的，
+# 不只在切号期间。现在改走环境变量，因为 `/proc/<pid>/environ` 只有同 UID 读得到。
+# ⭐ 买到的东西比听起来窄，README 里也这么写：在一台你本来就是 root 的机器上，root
+#    一直都读得到 `environ`。准确说法是「**不再对任意用户可读**」，不是「地址不再暴露」。
+#
+# 🔴 Two directions, and the second one is the silent one.
+#    A → every `$ENV.QS_JQ_X` read has a `QS_JQ_X=` prefix in the same file. Without it
+#        jq yields `null`, not `""` -- a DIFFERENT value from what `--arg` gave.
+#    B → every `QS_JQ_X=` prefix has a `$ENV.QS_JQ_X` reader in the same file. A prefix
+#        left behind after its expression was rewritten breaks nothing and shows nothing;
+#        it just quietly puts the address back into the environment for no reason.
+#    ⭐ Direction A fails loudly (`.accounts[null]` errors). Direction B fails silently,
+#      which is why checking only A would be checking only the half that already screams.
+# 🔴 两个方向，而**第二个是无声的那个**：
+#    A → 每个 `$ENV.QS_JQ_X` 读取，同文件里都得有 `QS_JQ_X=` 前缀。缺了 jq 拿到的是
+#        `null` 而不是 `""`——与 `--arg` 给的**不是同一个值**。
+#    B → 每个 `QS_JQ_X=` 前缀，同文件里都得有 `$ENV.QS_JQ_X` 读取。表达式改写后遗留的
+#        前缀不会坏任何事、也不会显出任何症状，它只是白白把地址又放回环境里。
+#    ⭐ A 是响的（`.accounts[null]` 会报错），B 是哑的；只查 A 等于只查了本来就会叫的那一半。
+# 口径与**它答不了什么**，写在这里，别让读的人自己猜。
+# SCOPE, and what this CANNOT answer -- stated rather than left to be assumed.
+#
+# 判的是「名字级」：某个 `$ENV.QS_JQ_X` 在本文件里有没有对应的 `QS_JQ_X=` 前缀。
+# ⚠️ 它**判不了**「这一个调用点的前缀掉了没有」——同一个名字常有多个调用点各设各的前缀，
+#    拿掉其中一个，名字仍然在，本判据一声不吭。
+# ⭐ 那一格不是没人管，是**换了一层管**：前缀掉了，jq 拿到的是 `null` 而不是地址，
+#    于是回归里那条具体的行为断言会红。这不是推测——本次改动过程中真的掉过两次前缀
+#    （lib/state.sh 的面板落盘、以及同一处的 `.account = $e`），两次都是被回归里
+#    「guard 后另读身份」与「网络耗时被从档位中扣掉」这两条断言当场抓住的，
+#    不是被任何静态检查抓住的。posctrl 的 `argv-env-prefix-dropped` 把这条路固化成
+#    可复跑的消融：拿掉一个前缀，点名的那条回归断言必须变红。
+#
+# This is a NAME-level check: does every `$ENV.QS_JQ_X` read in a file have a matching
+# `QS_JQ_X=` prefix somewhere in that file?
+# ⚠️ It CANNOT answer "did THIS call site lose its prefix" -- one name is typically set by
+#    several call sites, so dropping one leaves the name present and this check silent.
+# ⭐ That gap is covered one layer down, not left open: without the prefix jq sees `null`
+#    instead of an address, and a specific behavioural assertion in the suite goes red.
+#    Not a prediction -- during this change the prefix really was dropped twice, and both
+#    times it was the behavioural assertions that caught it, never a static check.
+#    `posctrl.sh`'s `argv-env-prefix-dropped` freezes that path into a re-runnable
+#    ablation: drop one prefix, and the NAMED regression assertion has to go red.
+_env_pairing_violations() {
+  local dir="$1" f base refs prefixes n
+  for f in "$dir"/lib/*.sh "$dir/quota-sentinel" "$dir/account-probe"; do
+    [[ -f "$f" ]] || continue
+    base=$(basename "$f")
+    refs=$(grep -ohE '\$ENV\.QS_JQ_[A-Z0-9_]+' "$f" | sed 's/^\$ENV\.//' | sort -u)
+    prefixes=$(grep -ohE '(^|[^A-Za-z0-9_])QS_JQ_[A-Z0-9_]+=' "$f" \
+               | grep -oE 'QS_JQ_[A-Z0-9_]+' | sort -u)
+    for n in $refs;     do grep -qx "$n" <<<"$prefixes" || echo "$base: 读 \$ENV.$n 但本文件没有任何 $n= 前缀 (A)"; done
+    for n in $prefixes; do grep -qx "$n" <<<"$refs"     || echo "$base: 设了 $n= 前缀但本文件没人读 \$ENV.$n (B)"; done
+  done
+}
+_ep=$(_env_pairing_violations "$QS_SOURCE")
+if [[ -z "$_ep" ]]; then
+  pass "jq env 传参两侧配对（读有前缀、前缀有人读）"
+else
+  fail "jq env 传参配对断了：$(printf '%s' "$_ep" | tr '\n' '; ')"
+fi
+
+# 正控，两个方向各一个。只做 A 会漏掉恒拒/恒过的那一半。
+mkdir -p "$TMP/ep-a/lib" "$TMP/ep-b/lib"
+cp "$QS_SOURCE"/lib/*.sh "$TMP/ep-a/lib/"; cp "$QS_SOURCE"/lib/*.sh "$TMP/ep-b/lib/"
+# A：把该名字在本文件里的**全部**前缀拿掉，留着读它的表达式（名字级判据只认得这一种）
+sed -i 's/QS_JQ_AE="\$actual_email" //' "$TMP/ep-a/lib/state.sh"
+# B：加一个谁都不读的前缀
+sed -i 's/^  QS_JQ_A="\$acct" quota_state_merge /  QS_JQ_NOBODY="x" QS_JQ_A="\$acct" quota_state_merge /' "$TMP/ep-b/lib/state.sh"
+_ep_a=$(_env_pairing_violations "$TMP/ep-a"); _ep_b=$(_env_pairing_violations "$TMP/ep-b")
+if grep -q '(A)' <<<"$_ep_a" && grep -q '(B)' <<<"$_ep_b"; then
+  pass "正控：A 向（读了没前缀）与 B 向（前缀没人读）都各自抓得到"
+else
+  fail "正控没红（A=[${_ep_a}] B=[${_ep_b}]）：这条配对判据没有分辨力"
+fi
+
+# ── 静态面：账号地址不得再出现在 jq 的 --arg 上 ──
+# ⚠️ 口径与边界写在这里，别让读的人自己猜：本判据按**变量名**认地址，认的是下面这张表。
+#    换句话说它答的是「已知这些持有地址的变量，有没有谁又被放回 --arg」，
+#    **不**答「argv 里有没有地址」——后者由 tools/credential-argv-control.sh 在**运行时**
+#    采样 `ps` 来答，那一条不依赖任何变量名表。两条判据的盲区不重叠，这是刻意的。
+# ⚠️ This check recognises an address BY VARIABLE NAME, from the table below. It answers
+#    "did any known address-bearing variable get put back on a --arg", NOT "is there an
+#    address in argv" -- that second question is answered at RUNTIME by
+#    tools/credential-argv-control.sh sampling `ps`, which needs no name table. The two
+#    have deliberately non-overlapping blind spots.
+# 🔴 两种形态，第二种是这次实撞出来的：
+#    ① `--arg e "$email"`                       —— 值走 jq 的参数
+#    ② `quota_state_get ".accounts[\"$email\"]"` —— 地址被插进 jq 的**程序文本**
+#    ⭐ 只查 ① 的那一版是绿的，而 ② 就在同一个文件里活着，是**运行时穷举通道**抓到的。
+#      「遍历到没到」有正控，「模式集全不全」没有——补上第二种，正是补后一问。
+# 🔴 Two shapes, and the second one really bit here:
+#    ① `--arg e "$email"`                        -- the value is a jq argument
+#    ② `quota_state_get ".accounts[\"$email\"]"`  -- the address is interpolated into the
+#                                                   jq PROGRAM TEXT
+#    ⭐ The version that checked only ① was green while ② was alive in the same file; the
+#      runtime exhaustive channel is what caught it. "Did the sweep reach it" has a
+#      control; "is the pattern set complete" does not -- adding ② answers that one.
+_addr_in_argv() {
+  local dir="$1" f
+  local vars='email|expected_email|actual_email|before_email|after_email|em|acct|current|to|from|target|cur|HOST_ACCOUNT|QUOTA_RETIRED_ACCOUNTS|QUOTA_DISABLED_ACCOUNTS'
+  # ⚠️ 先把整行注释滤掉再匹配。不滤的话，**写下「不许这么写」的那句注释本身**会被报成违规
+  #    —— 实撞：lib/reading.sh 里那两行解释「不能用 `.accounts[\"$email\"]`」的注释，
+  #    把这条判据打红了。⭐ 排查者变成了事件源；判据该按「哪一行会被执行」判，
+  #    不是按「哪一行提到了它」判。
+  # ⚠️ Whole-line comments are stripped BEFORE matching. Without that, the very comment
+  #    saying "do not write this" is reported as a violation -- measured: the two lines in
+  #    lib/reading.sh explaining why `.accounts[\"$email\"]` is wrong turned this check red.
+  #    ⭐ The check must judge what EXECUTES, not what MENTIONS it.
+  for f in "$dir"/lib/*.sh "$dir/quota-sentinel" "$dir/account-probe"; do
+    [[ -f "$f" ]] || continue
+    awk -v F="$(basename "$f")" '!/^[[:space:]]*#/ { print F ":" NR ": " $0 }' "$f"
+  done | grep -E -- "(--arg [A-Za-z_][A-Za-z0-9_]* \"\\$\{?($vars)[\":}])|(\\[\\\\?\"\\$\{?($vars)[^A-Za-z0-9_])" \
+       | cut -c1-140 || true
+}
+
+_aia=$(_addr_in_argv "$QS_SOURCE")
+if [[ -z "$_aia" ]]; then
+  pass "没有账号地址进 jq 命令行（两种形态：--arg 值、插进程序文本）"
+else
+  fail "账号地址又进了 jq 命令行：$(printf '%s' "$_aia" | tr '\n' '; ')"
+fi
+# 正控**两种形态各一个**。只造 ① 的正控，就正好复现这次的失败：判据对 ② 恒绿，
+# 而正控只证明了 ① 那一半有牙。
+# One control PER SHAPE. A control for ① only is exactly how this failed: the check was
+# permanently green on ②, and the control only ever proved ① had teeth.
+mkdir -p "$TMP/aia/lib" "$TMP/aia2/lib"
+cp "$QS_SOURCE"/lib/*.sh "$TMP/aia/lib/"; cp "$QS_SOURCE"/lib/*.sh "$TMP/aia2/lib/"
+printf '\n_posctrl_addr() { jq -cn --arg e "$email" %s; }\n' "'\$e'" >> "$TMP/aia/lib/detect.sh"
+printf '\n_posctrl_addr2() { quota_state_get ".accounts[\\"$email\\"].five" ""; }\n' >> "$TMP/aia2/lib/detect.sh"
+_aia_pc1=$(_addr_in_argv "$TMP/aia"); _aia_pc2=$(_addr_in_argv "$TMP/aia2")
+if [[ -n "$_aia_pc1" && -n "$_aia_pc2" ]]; then
+  pass "正控：① 地址进 --arg 与 ② 地址插进 jq 程序文本，两种形态都抓得到"
+else
+  fail "正控没红（①=[${_aia_pc1:-空}] ②=[${_aia_pc2:-空}]）：该形态上这条判据没有分辨力"
+fi
 
 echo "── 靠全局变量回传结果的函数，不许被命令替换调用 ──"
 # ⭐ 上游用例 #100 守的是一个 bash 语言级陷阱，与那套环境毫无关系，所以搬过来：
@@ -1912,8 +2070,17 @@ JSON
   quota_session_created() { printf '4242\n'; }
   quota_monitor_live_launch_id() { printf 'launch-shadow\n'; }
 
+  # 归属四值走文件，不走命令行（见 lib/reading.sh 里 quota_monitor_launch_command 的注释）。
+  # Ownership travels in a file, not on the command line.
+  _owner_file() {
+    local f="$TMP/owner-$4.json"
+    jq -cn --arg a "$1" --arg u "$2" --arg g "$3" --arg l "$4" \
+      '{account:$a, uuid:$u, generation:$g, launch_id:$l}' > "$f"
+    printf '%s' "$f"
+  }
+
   if printf '%s' "$payload" | quota_shadow_statusline_ingest \
-       "shadow@x" "uuid-shadow" "4242" "launch-shadow" >/dev/null 2>&1 \
+       --owner-file "$(_owner_file shadow@x uuid-shadow 4242 launch-shadow)" >/dev/null 2>&1 \
      && [[ -s "$QUOTA_SHADOW_STATUSLINE_EVENTS" ]]; then
     pass "statusLine 有效帧写入独立 JSONL"
   else
@@ -1942,7 +2109,7 @@ JSON
   fi
 
   printf '%s' "$payload" | quota_shadow_statusline_ingest \
-    "shadow@x" "uuid-shadow" "4242" "launch-shadow" >/dev/null 2>&1 || true
+    --owner-file "$(_owner_file shadow@x uuid-shadow 4242 launch-shadow)" >/dev/null 2>&1 || true
   if [[ -f "$QUOTA_SHADOW_STATUSLINE_EVENTS" ]]; then count=$(wc -l < "$QUOTA_SHADOW_STATUSLINE_EVENTS"); else count=0; fi
   if (( count == 1 )); then
     pass "statusLine 回调在当前实验频率窗口内节流"
@@ -1951,7 +2118,7 @@ JSON
   fi
 
   printf '%s' "${payload/claude-session-1/claude-session-2}" | quota_shadow_statusline_ingest \
-    "shadow@x" "uuid-shadow" "old-generation" "launch-shadow" >/dev/null 2>&1 || true
+    --owner-file "$(_owner_file shadow@x uuid-shadow old-generation launch-shadow)" >/dev/null 2>&1 || true
   if [[ -f "$QUOTA_SHADOW_STATUSLINE_EVENTS" ]]; then count=$(wc -l < "$QUOTA_SHADOW_STATUSLINE_EVENTS"); else count=0; fi
   if (( count == 1 )); then
     pass "statusLine 旧 monitor 代际帧被丢弃，不会串账号"
@@ -1959,12 +2126,49 @@ JSON
     fail "statusLine 接收了旧 monitor 代际帧"
   fi
 
+  QUOTA_SHADOW_STATUSLINE_OWNER_DIR="$TMP/owner-dir"
   if launch=$(quota_monitor_launch_command "shadow@x" "uuid-shadow" "4242" "launch-shadow" 2>/dev/null) \
      && [[ "$launch" == *"--settings"* && "$launch" == *"shadow-statusline-ingest"* \
            && "$launch" == *"refreshInterval"* ]]; then
     pass "专用 monitor 启动命令注入低频 statusLine 采样器"
   else
     fail "专用 monitor 启动命令没有注入 statusLine 采样器"
+  fi
+
+  # 🔴 这条命令是要被 send-keys 进 pane 去启动 CLI 的 ⇒ 它出现在那个**长命进程**的 argv 里。
+  #    这里守的不是「短命 jq 调用」，是整个会话期间都躺在 /proc/<pid>/cmdline 里的那份。
+  # 🔴 This command is sent into a pane to launch the CLI, so it becomes the argv of a
+  #    LONG-LIVED process. What is guarded here is not a microsecond-long jq call but a
+  #    string that sits in /proc/<pid>/cmdline for the entire session.
+  if [[ "$launch" != *"shadow@x"* && "$launch" != *"uuid-shadow"* ]]; then
+    pass "启动命令里没有账号地址与 UUID（归属四值走 0600 文件）"
+  else
+    fail "启动命令仍带账号身份，会长期留在 monitor 进程的 argv 里"
+  fi
+  if [[ -s "$QUOTA_SHADOW_STATUSLINE_OWNER_DIR/launch-shadow.json" ]] \
+     && [[ "$(stat -c '%a' "$QUOTA_SHADOW_STATUSLINE_OWNER_DIR/launch-shadow.json")" == 600 ]] \
+     && [[ "$(jq -r '.account' "$QUOTA_SHADOW_STATUSLINE_OWNER_DIR/launch-shadow.json")" == "shadow@x" ]]; then
+    pass "归属文件按 0600 写下且内容正确（上一条不是因为四个值根本没被传出去）"
+  else
+    fail "归属文件缺失、权限不对或内容不对 —— 上一条的绿说明不了任何事"
+  fi
+  # ⚠️ 这条判据的正控**不在这里**，在 posctrl 的 `statusline-addr-in-argv`：那条把
+  #    构造命令的写法改回「四个位置参数」再看这条断言红不红。写在这里的任何「正控」
+  #    都只会是在测 bash 的 `==` 通配符匹配，而不是在测这条判据有没有分辨力
+  #    —— 判据锚在谈论它的文字上，就近乎恒真。
+  # ⚠️ The control for this assertion lives in posctrl (`statusline-addr-in-argv`), which
+  #    reverts the command construction to the four-positional form and requires THIS
+  #    assertion to go red. Anything written inline here would only exercise bash pattern
+  #    matching, not this judgement -- a control anchored on prose about a check is very
+  #    nearly always true.
+  # 上一代 owner 文件必须被清掉 —— 既不留只增不减的凭据相关文件，也顺带把旧代际挡在门外。
+  : > "$QUOTA_SHADOW_STATUSLINE_OWNER_DIR/launch-stale.json"
+  quota_monitor_launch_command "shadow@x" "uuid-shadow" "4242" "launch-shadow" >/dev/null 2>&1
+  if [[ ! -e "$QUOTA_SHADOW_STATUSLINE_OWNER_DIR/launch-stale.json" \
+        && -s "$QUOTA_SHADOW_STATUSLINE_OWNER_DIR/launch-shadow.json" ]]; then
+    pass "上一代归属文件被清掉，当代的还在（不是只增不减）"
+  else
+    fail "归属文件目录只增不减，或把当代的一起删了"
   fi
 
   if [[ "$(sha256sum "$QUOTA_STATE" | awk '{print $1}')" == "$main_before" ]]; then
@@ -1980,7 +2184,7 @@ JSON
   if [[ -f "$QUOTA_SHADOW_STATUSLINE_EVENTS" ]]; then count=$(wc -l < "$QUOTA_SHADOW_STATUSLINE_EVENTS"); else count=0; fi
   before_launch_count=$count
   printf '%s' "${payload/claude-session-1/claude-session-old}" | quota_shadow_statusline_ingest \
-    "shadow@x" "uuid-shadow" "4242" "launch-shadow" >/dev/null 2>&1 || true
+    --owner-file "$(_owner_file shadow@x uuid-shadow 4242 launch-shadow)" >/dev/null 2>&1 || true
   if [[ -f "$QUOTA_SHADOW_STATUSLINE_EVENTS" ]]; then count=$(wc -l < "$QUOTA_SHADOW_STATUSLINE_EVENTS"); else count=0; fi
   if (( count == before_launch_count )); then
     pass "同 tmux 代际内上一代 cc 的 statusLine callback 被 launch id 丢弃"

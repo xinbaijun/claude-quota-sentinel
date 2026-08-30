@@ -210,15 +210,15 @@ quota_usage_refresh_begin() {
   seq=$(quota_state_get '.usage_refresh.refresh_seq' 0)
   [[ "$seq" =~ ^[0-9]+$ ]] || seq=0
   seq=$(( seq + 1 )); next=$(( now + effective ))
-  quota_state_merge '
+  QS_JQ_E="$email" quota_state_merge '
       .usage_refresh =
-        ((if ((.usage_refresh.account // "") == $e and (.usage_refresh.uuid // "") == $u)
+        ((if ((.usage_refresh.account // "") == $ENV.QS_JQ_E and (.usage_refresh.uuid // "") == $u)
           then (.usage_refresh // {}) else {} end)
-         + {account:$e, uuid:$u, monitor_generation:$g,
+         + {account:$ENV.QS_JQ_E, uuid:$u, monitor_generation:$g,
             monitor_launch_id:$l,
             refresh_seq:$seq, last_attempt_ts:$t, next_due_ts:$next,
             interval_seconds:$interval, last_mode:$mode, last_outcome:"in_flight"})' \
-    --arg e "$email" --arg u "$uuid" --argjson g "$generation" --arg l "$launch_id" \
+    --arg u "$uuid" --argjson g "$generation" --arg l "$launch_id" \
     --argjson seq "$seq" --argjson t "$now" --argjson next "$next" \
     --argjson interval "$effective" --arg mode "$mode" || return 1
   QUOTA_REFRESH_SEQ=$seq
@@ -316,7 +316,7 @@ quota_panel_log_observation() (
     week_reset=$(quota_panel_field "$parsed" 4)
   fi
   sha=$(printf '%s' "$frame" | sha256sum | awk '{print $1}')
-  event=$(jq -cn --arg email "$email" --arg uuid "$uuid" --arg mode "$mode" \
+  event=$(QS_JQ_EMAIL="$email" jq -cn --arg uuid "$uuid" --arg mode "$mode" \
     --arg status "$status" --arg frame "$frame" --arg sha "$sha" \
     --arg five "$five" --arg week "$week" --arg five_reset "$five_reset" \
     --arg week_reset "$week_reset" --argjson observed "$observed" \
@@ -325,7 +325,7 @@ quota_panel_log_observation() (
     --argjson network_interval "$(quota_state_get '.usage_refresh.interval_seconds' "$QUOTA_USAGE_INTERVAL_NEAR")" \
     --argjson next_due "$(quota_state_get '.usage_refresh.next_due_ts' 0)" '
       {schema:1,source:"usage_panel_screen",mode:$mode,decision_eligible:false,
-       observed_at:$observed,status:$status,account:{email:$email,uuid:$uuid},
+       observed_at:$observed,status:$status,account:{email:$ENV.QS_JQ_EMAIL,uuid:$uuid},
        parsed:{five_hour:(if $five=="" then null else ($five|tonumber) end),
                seven_day:(if $week=="" then null else ($week|tonumber) end),
                five_reset_text:(if $five_reset=="" then null else $five_reset end),
@@ -385,12 +385,12 @@ quota_account_guard() {
     reason="account-drift"
   elif [[ -z "$expected_email" ]]; then
     # 升级存量状态时只建立一次基线；之后再看到别的账号绝不自动改基线。
-    if ! quota_state_merge '
-        .account_guard.expected_email = $e
+    if ! QS_JQ_E="$actual_email" quota_state_merge '
+        .account_guard.expected_email = $ENV.QS_JQ_E
         | .account_guard.expected_uuid = $u
         | .account_guard.established_ts = $t
         | .account_guard.last_ok_ts = $t' \
-        --arg e "$actual_email" --arg u "$oauth_uuid" --argjson t "$(date +%s)"; then
+        --arg u "$oauth_uuid" --argjson t "$(date +%s)"; then
       QUOTA_LAST_ERROR="account-guard:state-write-failed"
       return 1
     fi
@@ -427,16 +427,16 @@ quota_account_guard() {
     last_log_ts=$now
   fi
   QUOTA_LAST_ERROR="account-guard:$reason"
-  quota_state_merge '
+  QS_JQ_AE="$actual_email" quota_state_merge '
       .phase = "account_drift"
       | .poll.last_error = $err
       | .account_guard.last_drift = {
           ts:$t, log_ts:$lt, context:$ctx, reason:$r,
-          actual_email:$ae, actual_oauth_uuid:$au, actual_usage_uuid:$uu
+          actual_email:$ENV.QS_JQ_AE, actual_oauth_uuid:$au, actual_usage_uuid:$uu
         }' \
     --arg err "$QUOTA_LAST_ERROR" --argjson t "$now" --argjson lt "$last_log_ts" \
     --arg ctx "$context" --arg r "$reason" \
-    --arg ae "$actual_email" --arg au "$oauth_uuid" --arg uu "$usage_uuid" || true
+    --arg au "$oauth_uuid" --arg uu "$usage_uuid" || true
   if (( should_log )); then
     quota_log "❌ account identity guard blocked ($reason, context=$context): expected [${expected_email:-not-established}], actual [${actual_email:-unreadable}] -> fail closed, not following"
   fi
@@ -447,7 +447,8 @@ quota_account_guard() {
     if [[ "$last_rec" != "$actual_email" ]]; then
       quota_account_switch_record "$now" "${expected_email:-unknown}" "$actual_email" "external" \
         "not initiated by this tool; the guard has failed closed and is not following. If this was intended, switch with: quota-sentinel switches (to review) then account-switch --use $actual_email"
-      quota_state_merge '.account_guard.last_switch_recorded = $a' --arg a "$actual_email" || true
+      QS_JQ_A="$actual_email" quota_state_merge \
+        '.account_guard.last_switch_recorded = $ENV.QS_JQ_A' || true
     fi
   fi
   return 1
@@ -521,12 +522,12 @@ quota_monitor_bind_owner() {
     quota_log "❌ the launch id was rewritten concurrently after the monitor launch -> owner not recorded"
     return 1
   fi
-  if ! quota_state_merge '
-      .monitor_account = $a
+  if ! QS_JQ_A="$expected_email" quota_state_merge '
+      .monitor_account = $ENV.QS_JQ_A
       | .monitor_uuid = $u
       | .monitor_session_created = $g
       | .monitor_launch_id = $l' \
-      --arg a "$expected_email" --arg u "$expected_uuid" \
+      --arg u "$expected_uuid" \
       --argjson g "$live_gen" --arg l "$live_launch"; then
     quota_log "❌ monitor ownership/generation could not be persisted -> not reading the panel"
     return 1
@@ -580,11 +581,11 @@ quota_ratio_update() {
      && (( five >= l_five && week >= l_week )); then
     add_f=$(( five - l_five )); add_w=$(( week - l_week ))
   fi
-  quota_state_merge '.ratio.last = {acct:$a, five:$f, week:$w}
+  QS_JQ_A="$acct" quota_state_merge '.ratio.last = {acct:$ENV.QS_JQ_A, five:$f, week:$w}
       | .ratio.five_total = ((.ratio.five_total // 0) + $af)
       | .ratio.week_total = ((.ratio.week_total // 0) + $aw)
       | .ratio.updated = $t' \
-    --arg a "$acct" --argjson f "$five" --argjson w "$week" \
+    --argjson f "$five" --argjson w "$week" \
     --argjson af "$add_f" --argjson aw "$add_w" --argjson t "$now"
 }
 
@@ -902,21 +903,21 @@ quota_read_once() {
   # The fresh value, the network success cadence and decided_seq go in **one** atomic
   # merge: one server-side refresh is acted on at most once.
   # 新鲜值、网络成功节奏与 decided_seq 同一次 atomic merge：同一个服务端刷新最多决策一次。
-  if ! quota_state_merge '
-      .account = $e | .uuid = $u | .fetched_ts = $f
+  if ! QS_JQ_E="$email" quota_state_merge '
+      .account = $ENV.QS_JQ_E | .uuid = $u | .fetched_ts = $f
       | .five_hour = $five | .seven_day = $week
       | .five_reset_ts = $fr | .week_reset_ts = $wr
       | .poll.last_ts = $t | .poll.last_error = null
-      | .accounts[$e] = {five: $five, week: $week, five_reset: $fr, week_reset: $wr, checked_ts: $t, source: "usage_panel"}
+      | .accounts[$ENV.QS_JQ_E] = {five: $five, week: $week, five_reset: $fr, week_reset: $wr, checked_ts: $t, source: "usage_panel"}
       | .reading_source = "usage_panel" | .reading_source_ts = $f
       | .usage_refresh = ((.usage_refresh // {}) + {
-          account:$e, uuid:$u, monitor_generation:$generation,
+          account:$ENV.QS_JQ_E, uuid:$u, monitor_generation:$generation,
           monitor_launch_id:$launch,
           refresh_seq:$seq, decided_seq:$seq, last_success_ts:$t,
           last_outcome:"ok", interval_seconds:$interval,
           next_due_ts:$next, backoff_seconds:null
         })' \
-    --arg e "$email" --arg u "$uuid" --argjson f "$fetched" \
+    --arg u "$uuid" --argjson f "$fetched" \
     --argjson five "$five" --argjson week "$week" \
     --argjson fr "$five_reset" --argjson wr "$week_reset" \
     --argjson t "$now" --argjson seq "$refresh_seq" \
