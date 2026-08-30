@@ -175,17 +175,59 @@ QUOTA_SNAPSHOT_FILE="$TMP/account-quota-snapshot.json"
 # ⚠️ 构造期断言：任何 QUOTA_* 路径都不许指进真的状态目录。这条不看「测试有没有真的写」，
 #    只看「有没有可能写」——写没写要看运行时走没走到，是概率问题；指没指对是构造问题，
 #    当场可判，也就不会漏。放在开头而不是收尾：一旦指错，等跑完再报时已经污染了几百条用例。
+# 🔴 TWO predicates, and the second one exists because the first was structurally blind.
+#    Predicate ① compares against $QS_REAL_STATE_DIR. That covers the state directory
+#    family and **nothing else** -- and the two most dangerous paths in this project,
+#    QUOTA_CLAUDE_JSON and QUOTA_CREDENTIALS_FILE, live under $HOME and NOT under
+#    $HOME/.local/state/quota-sentinel. So ① could never warn about them, while README's
+#    "What it touches" table marks both **write**.
+#    ⭐ This is the G-9 incident repeating on a different object: the fix back then was to
+#    replace "enumerate them one by one" with a STRUCTURAL check -- but the structural
+#    check's PREDICATE still only covered one family, so the credential family was still
+#    being guarded by enumeration (by each case remembering to export its own fixture).
+# 🔴 **两个谓词，第二个存在是因为第一个结构上是瞎的。**
+#    谓词①比的是 $QS_REAL_STATE_DIR，它覆盖状态目录那一族、**别的什么都不覆盖**——
+#    而本项目最危险的两个路径 QUOTA_CLAUDE_JSON 与 QUOTA_CREDENTIALS_FILE 在 $HOME 下、
+#    **不在** $HOME/.local/state/quota-sentinel 下 ⇒ ①永远不会对它们报警，
+#    而 README「它会动你哪些文件」表里这两个都标着 **write**。
+#    ⭐ 这是 G-9 那次事故换了个对象重演：当年的修法是把「逐个列举」换成**结构判据**，
+#    但那条结构判据的**谓词**只覆盖了一族，凭据那一族仍然靠逐个列举（靠每条用例自己
+#    记得 export 夹具）在守。
+#
+# 先把两个凭据路径显式改指到夹具，再判——否则它们在 source 期就是 $HOME 下的真文件。
+# Redirect both credential paths to fixtures FIRST; otherwise at source time they are the
+# real files under $HOME.
+# ⚠️ Unconditional, not `${VAR:-default}`: lib/config.sh has already resolved both from the
+#    real $HOME by the time we get here, so a `:-` default would never apply. Anything the
+#    caller legitimately pre-pointed under $TMP is preserved by the guard below, which
+#    re-checks every value afterwards.
+# ⚠️ 无条件赋值，不用 `${VAR:-默认}`：走到这里时 lib/config.sh 已经把这两个从真实 $HOME
+#    解析出来了，`:-` 默认值根本不会生效。调用方本来就指到 $TMP 下的那种情况由下面那道闸
+#    重新逐个复核，不会被这里盖掉语义。
+[[ "${QUOTA_CLAUDE_JSON:-}"      == "$TMP"/* ]] || export QUOTA_CLAUDE_JSON="$TMP/identity.json"
+[[ "${QUOTA_CREDENTIALS_FILE:-}" == "$TMP"/* ]] || export QUOTA_CREDENTIALS_FILE="$TMP/credentials.json"
+
 _leaks=""
 for _v in $(compgen -v | grep '^QUOTA_'); do
   _val="${!_v:-}"
-  [[ "$_val" == "$QS_REAL_STATE_DIR"* ]] && _leaks="$_leaks $_v=$_val"
+  # ⚠️ 一个变量可能同时命中两个谓词（真状态目录通常也在 $HOME 下）；只列一次，
+  #    否则失败文案里同一个名字出现两遍，读的人会以为是两个不同的问题。
+  # ⚠️ One variable can match BOTH predicates (the real state dir is usually under $HOME
+  #    too). List it once -- a name appearing twice reads as two separate problems.
+  _hit=""
+  # ① points into the real state directory / ① 指进真状态目录
+  [[ "$_val" == "$QS_REAL_STATE_DIR"* ]] && _hit=1
+  # ② under $HOME but not under $TMP -- the credential family has exactly this shape
+  # ② 落在 $HOME 下却不在 $TMP 下 —— 凭据那一族正是这个形状
+  [[ -n "$_val" && "$_val" == "$HOME"/* && "$_val" != "$TMP"/* ]] && _hit=1
+  [[ -n "$_hit" ]] && _leaks="$_leaks $_v=$_val"
 done
 if [[ -n "$_leaks" ]]; then
-  printf 'aborting: these paths point into the REAL state directory and running on would corrupt it:%s\n' "$_leaks" >&2
+  printf 'aborting: these paths point at real files outside the sandbox and running on would touch them:%s\n' "$_leaks" >&2
   printf '  fix: give it a value under $TMP, or make sure it derives from $QS_STATE_DIR (already redirected here)\n' >&2
   exit 3
 fi
-unset _leaks _v _val
+unset _leaks _v _val _hit
 
 # ════════════════════════════════════════════════════════════════════════
 # Global tmux gate: deny every real tmux call by default
@@ -285,7 +327,7 @@ else
   pass "atomic rename 失败会向调用方报错，不会放行后续不可撤回动作"
 fi
 
-echo "── 选单入口：cc 改了选项文案之后还认不认得出 ──"
+echo "── 选单入口：客户端 改了选项文案之后还认不认得出 ──"
 # Measured background: the client changed option 2 from "Switch to usage credits" to
 # "Upgrade your plan". The legacy test anchored that line verbatim, so from then on
 # menu-detected was **0 for 28 days straight**, while the banner branch ran 165+ times in
@@ -318,7 +360,7 @@ echo "── 选单入口：scrollback 里的死选单不得误判 ──"
 if quota_menu_present "$(read_fx menu-in-scrollback.txt)"; then
   fail "新判据把 scrollback 里的死选单当成了活选单"
 else
-  pass "新判据不吃 scrollback 死选单（末 10 行有空 ❯ = cc 闲置）"
+  pass "新判据不吃 scrollback 死选单（末 10 行有空 ❯ = 客户端 闲置）"
 fi
 
 echo "── 横幅入口：用户在对话里提到横幅文案（2026-08-11 活体自激）──"
@@ -339,7 +381,7 @@ fi
 if quota_banner_present "$(read_fx self-trigger-user-message.txt)" >/dev/null; then
   fail "新判据仍会被用户消息触发"
 else
-  pass "新判据拒绝：横幅落在 ❯ 用户输入行上，不是 cc 渲染的横幅"
+  pass "新判据拒绝：横幅落在 ❯ 用户输入行上，不是 客户端 渲染的横幅"
 fi
 
 echo "── 横幅入口：用户正在 composer 里打这段字 ──"
@@ -400,7 +442,7 @@ else
   fail "带时区时新旧解析不一致（old=$o new=$n）"
 fi
 
-echo "── ISO 解析：cc 写进 .claude.json 的形态 ──"
+echo "── ISO 解析：客户端 写进 .claude.json 的形态 ──"
 iso_epoch=$(quota_iso_epoch "2026-08-11T08:10:00.492913+00:00" || echo "")
 if [[ "$(date -d "@$iso_epoch" '+%H:%M')" == "16:10" ]]; then
   pass "ISO 带偏移直读为本地 16:10（不经任何本地时区推断）"
@@ -807,6 +849,14 @@ else
 fi
 
 echo "── 靠全局变量回传结果的函数，不许被命令替换调用 ──"
+# ⭐ The upstream case guards a BASH LANGUAGE trap that has nothing to do with that
+#    environment, which is why it came across: when a caller writes `n=$(some_fn ...)`,
+#    the command substitution runs in a SUBSHELL, so assignments the function makes to
+#    globals never reach the parent shell. Upstream the symptom looked like a single `?`
+#    in a log; the actual consequence was far worse -- the counter was permanently 0, so
+#    the "delivery failed -> a human is needed" alarm **could never fire**, and a real
+#    failure was reported as "skipped this round, no action needed".
+#    The note upstream records this as the FIFTH time that trap was hit.
 # ⭐ 上游用例 #100 守的是一个 bash 语言级陷阱，与那套环境毫无关系，所以搬过来：
 #    调用方写 `n=$(some_fn ...)` 时，命令替换在**子 shell** 里跑，函数里对全局变量的
 #    赋值传不回父 shell。上游那次的症状看着只是日志里一个 `?`，实际后果严重得多——
@@ -1049,7 +1099,7 @@ fi
 
 # ── monitor lifecycle / monitor 生命周期 ──
 run_monitor_tests() {
-echo "── monitor 重启：保留 tmux/pane，只在原 shell 内替换 cc ──"
+echo "── monitor 重启：保留 tmux/pane，只在原 shell 内替换 客户端 ──"
 # 活体已证明 `/exit` 后 tmux session/window/pane 与 shell PID 都不变，而 Claude 子进程
 # 会换新。旧实现直接 kill-session，会改变 session_created，随后 poller 又按代际不匹配
 # 重启第二次。这里先把编排钉死：已有 monitor 只能 exit→launch→bind，不能 kill/new。
@@ -1088,7 +1138,7 @@ tmux() {
 if quota_monitor_restart 'target@x' 'uuid-target' >/dev/null 2>&1 \
    && [[ "$(tr '\n' ' ' < "$MONITOR_RESTART_TRACE")" == \
          "exit launch bind:target@x:uuid-target:launch-new " ]]; then
-  pass "已有 monitor 在原 pane 内 /exit→新 cc→owner 绑定，不杀/重建 tmux"
+  pass "已有 monitor 在原 pane 内 /exit→新 客户端→owner 绑定，不杀/重建 tmux"
 else
   fail "monitor restart 仍破坏 tmux 或没有原子绑定：$(tr '\n' ' ' < "$MONITOR_RESTART_TRACE")"
 fi
@@ -1098,7 +1148,7 @@ quota_monitor_shell_ready() { return 0; }
 if quota_monitor_restart 'target@x' 'uuid-target' >/dev/null 2>&1 \
    && [[ "$(tr '\n' ' ' < "$MONITOR_RESTART_TRACE")" == \
          "launch bind:target@x:uuid-target:launch-new " ]]; then
-  pass "monitor 已退回 shell 时直接拉起新 cc，不会再向 shell 发送 /exit"
+  pass "monitor 已退回 shell 时直接拉起新 客户端，不会再向 shell 发送 /exit"
 else
   fail "shell 恢复路径仍先发 /exit 或遗漏绑定：$(tr '\n' ' ' < "$MONITOR_RESTART_TRACE")"
 fi
@@ -1133,9 +1183,9 @@ if declare -F quota_monitor_live_launch_id >/dev/null 2>&1 && (
   quota_monitor_live_launch_id() { printf 'launch-new\n'; }
   ! quota_monitor_owner_guard "test-monitor-cc-generation" >/dev/null 2>&1
 ); then
-  pass "tmux 代际相同但 cc launch id 不同 → 旧进程 owner 证明失效"
+  pass "tmux 代际相同但 客户端 launch id 不同 → 旧进程 owner 证明失效"
 else
-  fail "只看 session_created，原 pane 内换 cc 后无法区分新旧进程"
+  fail "只看 session_created，原 pane 内换 客户端 后无法区分新旧进程"
 fi
 
 # restart 已经负责启动并绑定，prepare_owner 不得紧接着再 bind/再触发一次换代。
@@ -1174,9 +1224,9 @@ cat > "$QUOTA_STATE" <<'JSON'
 JSON
 if quota_monitor_prepare_owner >/dev/null 2>&1 \
    && [[ "$(tr '\n' ' ' < "$PREPARE_TRACE")" == "restart " ]]; then
-  pass "owner/launch 虽匹配但 cc 已回 shell → prepare_owner 仍只恢复一次"
+  pass "owner/launch 虽匹配但 客户端 已回 shell → prepare_owner 仍只恢复一次"
 else
-  fail "tmux 活着掩盖了已退出的 cc：$(tr '\n' ' ' < "$PREPARE_TRACE")"
+  fail "tmux 活着掩盖了已退出的 客户端：$(tr '\n' ' ' < "$PREPARE_TRACE")"
 fi
 _stub_restore quota_account_guard quota_monitor_alive quota_monitor_restart \
               quota_monitor_bind_owner quota_session_created quota_monitor_live_launch_id \
@@ -1276,7 +1326,7 @@ if quota_monitor_exit_to_shell >/dev/null 2>&1 \
    && [[ "$(cat "$MONITOR_FAKE_LAUNCH")" == 'launch-new' ]] \
    && [[ "$(tr '\n' ' ' < "$MONITOR_FAKE_TRACE")" == *'clear-shell-line literal:launch '* ]] \
    && ! grep -qE '^(kill-session|new-session)$' "$MONITOR_FAKE_TRACE"; then
-  pass "原 pane 内先清 shell 残留，再完成 /exit→新 cc；tmux 容器身份保持"
+  pass "原 pane 内先清 shell 残留，再完成 /exit→新 客户端；tmux 容器身份保持"
 else
   fail "原 pane 换代时序失败：$(tr '\n' ' ' < "$MONITOR_FAKE_TRACE")"
 fi
@@ -1286,9 +1336,9 @@ MONITOR_FAKE_EXIT_STUCK=1 QUOTA_MONITOR_EXIT_SEC=0
 if quota_monitor_exit_to_shell >/dev/null 2>&1; then
   fail "/exit 未回 shell 仍继续换代"
 elif ! grep -q 'literal:launch' "$MONITOR_FAKE_TRACE"; then
-  pass "/exit 未回 shell → fail closed，不发送新 cc 启动命令"
+  pass "/exit 未回 shell → fail closed，不发送新 客户端 启动命令"
 else
-  fail "/exit 失败后仍向旧 cc 塞了启动命令"
+  fail "/exit 失败后仍向旧 客户端 塞了启动命令"
 fi
 unset MONITOR_FAKE_EXIT_STUCK
 
@@ -1297,7 +1347,7 @@ MONITOR_FAKE_SWAP_PANE=1 QUOTA_MONITOR_EXIT_SEC=1
 if quota_monitor_exit_to_shell >/dev/null 2>&1; then
   fail "/exit 前后 pane_id 变化仍被当成原 pane 成功"
 else
-  pass "pane_id/pane_pid/session 任一变化 → 拒绝在未知 pane 启动 cc"
+  pass "pane_id/pane_pid/session 任一变化 → 拒绝在未知 pane 启动 客户端"
 fi
 unset MONITOR_FAKE_SWAP_PANE
 
@@ -1306,7 +1356,7 @@ MONITOR_FAKE_LAUNCH_FAIL=1 QUOTA_MONITOR_READY_SEC=0
 if quota_monitor_launch_in_pane >/dev/null 2>&1; then
   fail "启动命令立即失败回 shell仍被旧 composer 冒充 ready"
 else
-  pass "新 cc 未离开 shell → 即使屏上残留 composer 形文字也拒绝绑定"
+  pass "新 客户端 未离开 shell → 即使屏上残留 composer 形文字也拒绝绑定"
 fi
 unset MONITOR_FAKE_LAUNCH_FAIL
 QUOTA_MONITOR_READY_SEC=$SAVED_MONITOR_READY_SEC
@@ -1340,7 +1390,7 @@ printf 'launch-new\n' > "$MONITOR_FAKE_LAUNCH"
 if ! quota_monitor_bind_owner bind-test target@x uuid-target launch-new \
       transient-b@x uuid-b >/dev/null 2>&1 \
    && [[ "$(quota_state_get '.monitor_launch_id' '')" == 'launch-old' ]]; then
-  pass "凭据 A→B→A 时拒绝把 B 启动的 cc 绑定成 A（launch-time 身份闭环）"
+  pass "凭据 A→B→A 时拒绝把 B 启动的 客户端 绑定成 A（launch-time 身份闭环）"
 else
   fail "bind 只核最终文件，接受了启动瞬间属于 B 的 monitor"
 fi
@@ -1945,9 +1995,15 @@ fi
 echo "── reset 解析：五小时窗口的跨日回卷必须被钳制 ──"
 # 事故的根因之一：19:50:31 那帧写 `Resets 7:50pm`，而 19:50 刚过去，裸解析 +86400 变成
 # **明天 19:50**，比真帧的今天 00:50 还晚 → 「按 reset 比新旧」完全失效。
+# ⚠️ LC_ALL=C is mandatory: `date`'s %P/%b FOLLOW THE LOCALE. Under a Chinese locale `%P`
+#    prints a localised string instead of "pm", and feeding that to the parser produces an
+#    input that can never occur in reality -- the client's panel is always English.
+#    Without the lock these cases test the machine's locale rather than the production
+#    logic, and the failure message reads as though the PARSER is broken, which points
+#    whoever is debugging in the wrong direction.
 # ⚠️ 必须锁 LC_ALL=C：date 的 %P/%b 是**跟随 locale** 的，本机中文环境下 `%P` 输出
 #    「下午」而不是「pm」，喂给解析器就是一个现实中根本不会出现的字符串——
-#    cc 面板永远是英文。不锁的话这几条用例测的不是生产逻辑，而是本机 locale，
+#    客户端面板永远是英文。不锁的话这几条用例测的不是生产逻辑，而是本机 locale，
 #    且失败文案会显示成解析器坏了，把人引向错误方向。
 NOWHM=$(LC_ALL=C TZ=CST-8 date '+%-I:%M%P')          # 取「刚刚过去」的那个时刻文案
 PAST_LINE="Resets $(LC_ALL=C TZ=CST-8 date -d '-2 minutes' '+%-I:%M%P') (Asia/Shanghai)"
@@ -2060,9 +2116,9 @@ if ! quota_usage_refresh_due "$SCHED_NOW" 'sched@x' 'uuid-s' 111 'launch-111' \
    && quota_usage_refresh_due "$((SCHED_NOW+60))" 'sched@x' 'uuid-s' 111 'launch-111' \
    && quota_usage_refresh_due "$SCHED_NOW" 'sched@x' 'uuid-s' 111 'launch-new' \
    && quota_usage_refresh_due "$SCHED_NOW" 'other@x' 'uuid-o' 222 'launch-222'; then
-  pass "同账号/同 cc 代际在 next_due 前不触网；到点或账号/tmux/cc 代际变化立即刷新"
+  pass "同账号/同 客户端 代际在 next_due 前不触网；到点或账号/tmux/cc 代际变化立即刷新"
 else
-  fail "网络 due 没有按持久账号、tmux+cc 代际与 next_due 隔离"
+  fail "网络 due 没有按持久账号、tmux+客户端 代际与 next_due 隔离"
 fi
 LOCAL_MARK="$TMP/local-observe"; NETWORK_MARK="$TMP/network-refresh"
 rm -f "$LOCAL_MARK" "$NETWORK_MARK"
@@ -2403,9 +2459,9 @@ JSON
     --owner-file "$(_owner_file shadow@x uuid-shadow 4242 launch-shadow)" >/dev/null 2>&1 || true
   if [[ -f "$QUOTA_SHADOW_STATUSLINE_EVENTS" ]]; then count=$(wc -l < "$QUOTA_SHADOW_STATUSLINE_EVENTS"); else count=0; fi
   if (( count == before_launch_count )); then
-    pass "同 tmux 代际内上一代 cc 的 statusLine callback 被 launch id 丢弃"
+    pass "同 tmux 代际内上一代 客户端 的 statusLine callback 被 launch id 丢弃"
   else
-    fail "旧 cc callback 冒用了未变化的 session_created"
+    fail "旧 客户端 callback 冒用了未变化的 session_created"
   fi
   _stub_restore quota_identity_read quota_session_created quota_monitor_live_launch_id
   main_before=$(sha256sum "$QUOTA_STATE" | awk '{print $1}')
@@ -2864,13 +2920,23 @@ _stub_restore quota_monitor_prepare_owner quota_monitor_dismiss quota_monitor_pa
 _stub_restore quota_monitor_recover_stale_frame
 
 echo "── 采样：窗口内要取最大帧，不能取「第一个稳定的」──"
+# This is the other half of the fix. The old rule ("accept once N consecutive readings
+# agree") accepts the CACHED frame whenever the sequence is "cache appears first and
+# repeats, truth arrives later" -- and that is exactly the measured shape (the panel serves
+# a cache at +1s and only refreshes at +2s, and fetching is throttled).
 # 这是修复的另一半。旧规则「连续 N 次一致就收下」在「缓存帧先出现且重复多次、真值后到」
 # 的序列上会收下缓存帧——而这正是实测的形态（面板 +1s 给缓存、+2s 才刷新，且拉取有节流）。
 # ⚠️ 面板时刻必须动态生成为未来：写死 "Resets 3:29pm" 的话，现实时间一过 15:29，
 # 这一帧就真的属于过期窗口，被 stale 规则**正确地**拒掉——测试会在下午定时变红。
+# ⚠️ LC_ALL=C is mandatory: `date`'s %P/%b FOLLOW THE LOCALE. Under a Chinese locale `%P`
+#    prints a localised string instead of "pm", and feeding that to the parser produces an
+#    input that can never occur in reality -- the client's panel is always English.
+#    Without the lock these cases test the machine's locale rather than the production
+#    logic, and the failure message reads as though the PARSER is broken, which points
+#    whoever is debugging in the wrong direction.
 # ⚠️ 必须锁 LC_ALL=C：date 的 %P/%b 是**跟随 locale** 的，本机中文环境下 `%P` 输出
 #    「下午」而不是「pm」，喂给解析器就是一个现实中根本不会出现的字符串——
-#    cc 面板永远是英文。不锁的话这几条用例测的不是生产逻辑，而是本机 locale，
+#    客户端面板永远是英文。不锁的话这几条用例测的不是生产逻辑，而是本机 locale，
 #    且失败文案会显示成解析器坏了，把人引向错误方向。
 PANEL_SESS_RESET=$(LC_ALL=C TZ=CST-8 date -d '+2 hours' '+%-I:%M%P')
 PANEL_WEEK_RESET=$(LC_ALL=C TZ=CST-8 date -d '+3 days' '+%b %-d, %-I:%M%P')
@@ -3730,9 +3796,19 @@ else
 fi
 
 echo "── 候选筛选：坏的 reset 存值不得把可用账号挡在候选外 ──"
-# ⚠️ 上游 2026-08-12 12:04–12:08 实撞：某账号的 five_reset 是旧代码跨日回卷写下的
-#    9 小时后（五小时窗口不可能），于是被当成「已知满且尚未重置」跳过；候选为空 →
-#    三次触发全部直接判「全账号撞限」，而当前账号已经 100%。
+# ⚠️ Hit live upstream: an account's five_reset had been written by older day-rollover code
+#    as nine hours away (impossible for a five-hour window), so it was treated as "known
+#    full and not yet reset" and skipped. The candidate set went empty, and three
+#    consecutive triggers all concluded "every account is rate limited" -- while the
+#    current account was already at 100%.
+# 🔴 That defect is **structurally impossible** here: quota_switch_ranked_candidates looks
+#    only at the two percentages and never reads a reset at all. This is pinned as an
+#    ASSERTION rather than treated as "already fixed" -- the moment somebody adds a reset
+#    test to candidate filtering, this goes red and puts the original incident's reasoning
+#    in front of them.
+# ⚠️ 上游实撞：某账号的 five_reset 是旧代码跨日回卷写下的 9 小时后（五小时窗口不可能），
+#    于是被当成「已知满且尚未重置」跳过；候选为空 → 三次触发全部直接判「全账号撞限」，
+#    而当前账号已经 100%。
 # 🔴 本仓这条缺陷**结构上不可能**：quota_switch_ranked_candidates 只看 five/week 两个
 #    百分比，根本不读 reset。这里把它钉成断言，而不是当成「已经修好了」——一旦以后有人
 #    往候选筛选里加 reset 判断，这条会立刻红，并把当年那次事故的理由摆在他面前。

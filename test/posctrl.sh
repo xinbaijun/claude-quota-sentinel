@@ -160,6 +160,15 @@ REFREEZE
 # m_frozen <from> <to> — edit the frozen control group AND update its declared hash,
 # so the run gets past the integrity guard and reaches the detector assertion.
 m_frozen(){ m_sed test/fixtures/legacy-detectors.sh "$1" "$2" && m_refreeze; }
+# m_tmp_badparent / m_tmp_badvalue — break ONLY the "obtain a temp directory" step and
+# **keep both gates in place**.
+# ⭐ The first version removed the gates outright, so the copy ran happily, wrote files into
+#   `/`, and the ablation scored MISS. Removing a guard shows "what it looks like with no
+#   guard", not "whether the guard fires". An ablation mutates the TRIGGERING CONDITION,
+#   never the guard itself.
+# m_switch_noreadback — remove BOTH identity checks after a switch: removing only one leaves
+# the other still catching it, so the ablation goes green while the guard it certifies has
+# quietly lost half of itself.
 # m_tmp_badparent / m_tmp_badvalue — 只弄坏「取得临时目录」这一步，**保留那两道闸**。
 # ⭐ 第一版我把闸整个拆了，于是副本照跑、把文件写进 `/`，而消融被判 MISS ——
 #   拆掉守卫得到的是「没有守卫时的样子」，不是「守卫会不会响」。消融要动的是**触发条件**，
@@ -226,7 +235,7 @@ ablate p5-timezone-offset \
 # ══ 5. the construction-time leak assertion / 构造期泄漏断言 ═════════════
 ablate state-dir-leak \
   "构造期断言：任何 QUOTA_* 路径指进真状态目录就中止" --fast \
-  "point into the REAL state directory" \
+  "point at real files outside the sandbox" \
   m_append lib/config.sh 'QUOTA_POSCTRL_LEAK_PROBE="${XDG_STATE_HOME:-$HOME/.local/state}/quota-sentinel/posctrl-probe"'
 
 # ══ 6. the tmux gate / tmux 隔离闸 ═══════════════════════════════════════
@@ -300,10 +309,38 @@ ablate env-pairing-broken \
   "jq env 传参配对断了" \
   m_sed_all lib/state.sh 'QS_JQ_AE="$actual_email" ' ''
 
+# 🔴 构造期闸的**第二谓词**（凭据那一族）。谓词①只比状态目录前缀，对 $HOME 下的
+#    QUOTA_CLAUDE_JSON / QUOTA_CREDENTIALS_FILE 结构上是瞎的 —— 而那两个正是真凭据文件。
+#    消融动的是**触发条件**：把改指那一行撤掉，让它退回 $HOME 下的真路径。
+# 🔴 The construct-time gate's SECOND predicate (the credential family). Predicate ① only
+#    compares the state-directory prefix and is structurally blind to QUOTA_CLAUDE_JSON /
+#    QUOTA_CREDENTIALS_FILE under $HOME -- which are the real credential files.
+#    The ablation mutates the TRIGGERING CONDITION: drop the redirect so the value falls
+#    back to the real path under $HOME.
+ablate credential-path-unguarded \
+  "构造期闸必须拦住指向真凭据文件的路径（谓词②）" --fast \
+  "point at real files outside the sandbox" \
+  m_drop test/quota-sentinel.test.sh '^\[\[ "\$\{QUOTA_CLAUDE_JSON:-\}"'
+
+# ⚠️ `|| true` is load-bearing, not sloppiness. Without it this ablation's RESULT depended
+#    on whether the machine had a readable ~/.claude.json: the injected call runs at source
+#    time, quota_account_guard fails closed when it cannot read an identity, `source` then
+#    returns non-zero, the suite aborts with "cannot load lib/state.sh", and the NAMED
+#    assertion never runs -- scored MISS. Measured: empty $HOME -> MISS, $HOME with a
+#    synthetic .claude.json -> RED. ⭐ An ablation must mutate ONLY its triggering condition
+#    (here: "is the call written inside `$( )`"); breaking file loading as a side effect
+#    makes the result depend on the environment instead of on the guard.
+# ⚠️ `|| true` 是承重的，不是随手加的。没有它，这条消融的**结果**取决于机器上有没有一个
+#    读得到的 ~/.claude.json：注入的调用在 source 期执行，quota_account_guard 读不到身份时
+#    fail closed，`source` 于是返回非零，套件以「cannot load lib/state.sh」中止，
+#    **点名的那条断言根本没跑到** ⇒ 判 MISS。实测：空 $HOME → MISS；
+#    有合成 .claude.json 的 $HOME → RED。⭐ 消融只该动它的触发条件
+#    （这里是「这个调用有没有写在 `$( )` 里」）；顺带把文件加载弄坏，
+#    会让结果取决于环境而不是取决于守卫。
 ablate outparam-in-subshell \
   "靠全局回传的函数不许写在命令替换里（bash 语言陷阱）" --fast \
   "这些调用在子 shell 里跑" \
-  m_append lib/state.sh 'posctrl_probe=$(quota_account_guard "posctrl-injected")'
+  m_append lib/state.sh 'posctrl_probe=$(quota_account_guard "posctrl-injected" || true)'
 
 # ══ 8. the decision gates / 决策闸 ═══════════════════════════════════════
 ablate decide-stale-open \
@@ -349,6 +386,11 @@ ablate switch-line-not-enforced \
     '>= 100000 )) && continue'
 
 # ══ 9b. temp-directory acquisition / 临时目录取得 ═══════════════════════
+# ⚠️ The expectation here is deliberately NOT just "exit code is non-zero" -- before the
+#    hardening the exit code was already 1 (15 assertions failed). What is required is
+#    **abort AND not one PASS/FAIL produced** (see MUST_ABORT).
+#    ⭐ A "non-zero" expectation passes either way, i.e. goes green whether or not the fix
+#      is present.
 # ⚠️ 这两条的期望值刻意不只是「退出码非 0」——未加固时退出码本来就是 1（15 条断言失败）。
 #    要求的是**中止且一条 PASS/FAIL 都不产生**（见 MUST_ABORT）。
 ablate tmp-mktemp-failure \

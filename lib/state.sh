@@ -613,13 +613,27 @@ quota_session_generation_matches() {
   [[ "$current" == "$expected" ]]
 }
 
+# quota_scan_live_menus — a light sweep that runs every round and **depends on no incident
+# trace whatsoever**.
+#
+# The structural hole this came from: the dialog-clearing routine was reached from only two
+# places -- the all-accounts-exhausted path, and a follow-up sweep that ran only "if there
+# is a waiting/incident trace to act on". So the moment a round recovered cleanly and tidied
+# those traces away, **no round would ever look at a session's screen again**.
+# Measured: two sessions sat showing a rate-limit dialog; once the tidy-up removed the
+# traces they went unattended until someone checked by hand -- and the predicate recognised
+# them perfectly well (quota_menu_present returned true), nobody was asking it.
+#
+# ⚠️ The dangerous part is that the direction is INVERTED: **the better the recovery and the
+# cleaner the trace, the less anything sweeps.**
+#
 # quota_scan_live_menus — 每轮都跑的轻量巡扫，**不依赖任何事故痕迹**。
 #
-# 2026-08-19 16:5x 实撞暴露的结构洞：quota_clear_menus 全脚本只在两处被调用——
-# 全账号撞限，和 quota_after_recovery 里那段「有 waiting/episode 痕迹才扫」的补扫。
-# 于是一旦某轮恢复得很顺利、把痕迹清干净了，**就再也没有任何一轮会去看会话的屏幕**。
-# 当天 16:03 和 16:14 新建的两个会话弹着撞限框，16:11:51 收尾清掉痕迹之后无人问津，
-# 直到我手工去查才发现——判据认得出它们（quota_menu_present 返回真），只是没人去问。
+# 实撞暴露的结构洞：清框那段全脚本只在两处被调用——全账号撞限，和一段
+# 「有等待/事故痕迹才扫」的补扫。于是一旦某轮恢复得很顺利、把痕迹清干净了，
+# **就再也没有任何一轮会去看会话的屏幕**。当天两个会话弹着撞限框，
+# 收尾清掉痕迹之后无人问津，直到人工去查才发现——判据认得出它们
+# （quota_menu_present 返回真），只是没人去问。
 #
 # ⚠️ 方向是反的才是要命处：**恢复得越顺利、痕迹清得越干净，越没人扫**。
 #
@@ -890,7 +904,7 @@ quota_read_once() {
   #  Code's own flush cadence, measured 5–9 minutes behind, which directly produced
   #  "the user can see 98% while the script still says 93%".)
   # 面板读数就是**此刻**的值，不存在陈旧问题——所以 fetched 直接记完成时刻。
-  # （第一版从配置文件读，那是 cc 自己的落盘节奏，实测落后 5-9 分钟，
+  # （第一版从配置文件读，那是 客户端 自己的落盘节奏，实测落后 5-9 分钟，
   #   直接导致「用户看到 98% 了脚本还停在 93%」。）
   local s_reset_line w_reset_line
   five=$(quota_panel_field "$QUOTA_PANEL_LAST" 1)

@@ -26,7 +26,7 @@
 # entered zero times in 28 consecutive days while the banner branch ran 165+ times).
 # Screen detection is kept, but demoted to a fallback that is only consulted when
 # `/usage` cannot be read, and weak evidence must cross-check against `/usage`.
-# 权威读数没有公开接口。它来自驱动一个只发 `/usage` 的专用 cc 会话：那会让客户端从服务端
+# 权威读数没有公开接口。它来自驱动一个只发 `/usage` 的专用 客户端会话：那会让客户端从服务端
 # 拉**实时**额度并写进自己的配置文件，本脚本只读那份 JSON。换掉截屏方案当天的实测：
 # ①实时——/usage 读到 26%，同一时刻文件里的陈旧缓存还写着 100%（落后 15 小时）；
 # ②零额度成本——面板自报 Total cost $0.0000。旧做法把正则跟渲染文案绑死，文案一改就无声
@@ -38,7 +38,7 @@
 #    stale in-memory copy. So before any decision, verify the fetch timestamp is
 #    recent enough; if it is not, treat the reading as unknown and do nothing, and let
 #    the next `/usage` heal it.
-# ⚠️ 缓存新鲜度闸是硬要求：配置文件被全部并发 cc 会话共写，各自可能拿自己内存里的陈旧
+# ⚠️ 缓存新鲜度闸是硬要求：配置文件被全部并发 客户端会话共写，各自可能拿自己内存里的陈旧
 #    副本回写。因此任何决策前都必须校验取数时刻足够新，不新就当「未知」不动作。
 
 set -uo pipefail
@@ -357,22 +357,46 @@ quota_cmd_detect() {
 # 打印解析后的配置。它存在的理由：到目前为止每一次「在我机器上跑不起来」都归结为某个
 # 路径或偏移量解析到了报告者没料到的地方。
 quota_cmd_env() {
-  printf '%-28s %s\n' \
-    QS_ROOT              "$QS_ROOT" \
-    QS_STATE_DIR         "$QS_STATE_DIR" \
-    QUOTA_STATE          "$QUOTA_STATE" \
-    QUOTA_LOG            "$QUOTA_LOG" \
-    QUOTA_CLAUDE_JSON    "$QUOTA_CLAUDE_JSON" \
-    QUOTA_CREDENTIALS_FILE "$QUOTA_CREDENTIALS_FILE" \
-    QUOTA_MONITOR_SESSION "$QUOTA_MONITOR_SESSION" \
-    QUOTA_MONITOR_LAUNCH "$QUOTA_MONITOR_LAUNCH" \
-    QUOTA_SNAPSHOT_TOOL  "$QUOTA_SNAPSHOT_TOOL" \
-    QUOTA_TZ_OFFSET_SEC  "$QUOTA_TZ_OFFSET_SEC" \
-    QUOTA_TZ_LABEL       "$QUOTA_TZ_LABEL" \
-    QUOTA_FALLBACK_TZ    "${QUOTA_FALLBACK_TZ:-(local)}" \
-    QUOTA_RETIRED_ACCOUNTS "${QUOTA_RETIRED_ACCOUNTS:-(empty)}" \
-    QUOTA_DISABLED_ACCOUNTS "${QUOTA_DISABLED_ACCOUNTS:-(empty)}"
+  # 🔴 Enumerated, NOT hand-listed. The previous version listed 14 names by hand and had
+  #    drifted: it omitted QUOTA_SWITCH_MODE -- the one setting that decides whether this
+  #    run writes a credential at all -- plus the switch ledger, the backup directory, and
+  #    every JSONL that K5 calls this tool's largest PII surface. A reader following
+  #    "audit it before you let it act" could not see any of them.
+  #    ⭐ Same shape as G-8 (migrating only the side that writes): someone adds a variable
+  #    in lib/config.sh and nothing makes them add it here, so the list silently goes stale.
+  #    Enumerating removes the possibility instead of asking people to remember.
+  # 🔴 **枚举，不是手写清单。** 上一版手写了 14 个名字并且已经漂了：漏掉 QUOTA_SWITCH_MODE
+  #    ——决定这一次跑会不会写凭据的那唯一一个设置——以及切号流水账、备份目录、
+  #    和 K5 亲口称为「本工具最大 PII 面」的那几个 JSONL。照着「先审再用」走的人一个都看不到。
+  #    ⭐ 与 G-8「迁移只改了写入的那一侧」同形：有人在 lib/config.sh 加了变量，
+  #    而没有任何东西逼他同步这里，清单于是静默过期。枚举是把这个可能性拆掉，
+  #    而不是请人记得。
+  local v val
+  printf '── the one that decides whether anything is written / 决定会不会写东西的那一个\n'
+  printf '%-34s %s\n' QUOTA_SWITCH_MODE "${QUOTA_SWITCH_MODE:-(unset -> dry-run)}"
+  printf '\n── paths and settings (enumerated) / 路径与设置（枚举得到）\n'
+  printf '%-34s %s\n' QS_ROOT "$QS_ROOT" QS_STATE_DIR "$QS_STATE_DIR"
+  for v in $(compgen -v | grep '^QUOTA_' | sort); do
+    [[ "$v" == QUOTA_SWITCH_MODE ]] && continue
+    val="${!v}"
+    # Multi-line / very long values are jq snippets, not paths: elide them rather than
+    # flooding the screen -- but still print the NAME, so nothing is hidden.
+    # 多行/超长的是 jq 片段，不是路径；截断而不是刷屏，但**不隐藏它存在**
+    if [[ "$val" == *$'\n'* || ${#val} -gt 120 ]]; then
+      printf '%-34s %s\n' "$v" "($((${#val})) bytes, multi-line -- not a path)"
+    else
+      printf '%-34s %s\n' "$v" "${val:-(empty)}"
+    fi
+  done
+  printf '\n── written by account-switch, not a QUOTA_* variable / 由 account-switch 写、不是 QUOTA_* 变量\n'
+  printf '%-34s %s\n' "backup roots" "${ACCOUNT_SWITCH_ROOT_HOME:-$HOME} and ${ACCOUNT_SWITCH_ROOT_HOME:-$HOME}/claude-backups"
+  printf '\n⚠️ The monitor half runs inside tmux and inherits the tmux SERVER environment,\n'
+  printf '   so these values are what the shell half will use -- they are NOT necessarily\n'
+  printf '   what the monitor process sees. See K14.\n'
+  printf '⚠️ monitor 那一半在 tmux 里跑、继承的是 tmux **server** 的环境，\n'
+  printf '   所以上面这些是 shell 那一半会用的值，**不一定**是 monitor 进程看到的。见 K14。\n'
 }
+
 
 quota_usage_text() {
   cat >&2 <<'USAGE'

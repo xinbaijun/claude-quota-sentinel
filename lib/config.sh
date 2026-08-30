@@ -44,7 +44,7 @@ QS_STATE_DIR="${QS_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/quota-sentin
 # The mechanism — drive one dedicated Claude Code session that only ever types
 # `/usage` — is the core of this project, not a fleet dependency. Only the
 # *naming* was fleet-specific.
-# 「用 tmux 驱动一个只发 /usage 的专用 cc 会话」这个机制是本项目的核心，不是 Fleet 的
+# 「用 tmux 驱动一个只发 /usage 的专用 客户端会话」这个机制是本项目的核心，不是 Fleet 的
 # 一部分；Fleet 专有的只有命名。
 #
 # ⚠️ Upstream note kept, with its reason rewritten for this repo: the session name
@@ -286,7 +286,7 @@ QUOTA_FORCE_REFRESH_COOLDOWN="${QUOTA_FORCE_REFRESH_COOLDOWN:-60}"
 # — otherwise the fallback path never has a "usable" reading and weak evidence is
 # never accepted.
 # `.claude.json` 读数的可用窗口。主路已经不用它了（主路从面板取实时值），它只服务于
-# 兜底路径的一处交叉验证。那份 JSON 是 cc 自己的落盘节奏（实测两次写入间隔 5-9 分钟），
+# 兜底路径的一处交叉验证。那份 JSON 是 客户端 自己的落盘节奏（实测两次写入间隔 5-9 分钟），
 # 所以这个窗口必须给得宽，否则兜底路径永远拿不到"可用"的读数、弱证据一律不采信。
 QUOTA_FETCH_MAX_AGE="${QUOTA_FETCH_MAX_AGE:-900}"
 
@@ -575,7 +575,7 @@ QUOTA_SOURCE_EVENTS_LOCK="${QUOTA_SOURCE_EVENTS_LOCK:-$QS_STATE_DIR/quota-source
 # ── Regexes for the fallback UI detectors / 兜底 UI 判据用的正则 ────────
 # Empty `❯` composer line. Claude Code actually renders `❯<NBSP> `, and POSIX
 # [[:space:]] does not include NBSP → use [^[:alnum:]].
-# 空 ❯ composer 行。cc 实际渲染 `❯<NBSP> `，POSIX [[:space:]] 不含 NBSP → 用 [^[:alnum:]]。
+# 空 ❯ composer 行。客户端 实际渲染 `❯<NBSP> `，POSIX [[:space:]] 不含 NBSP → 用 [^[:alnum:]]。
 QUOTA_IDLE_CURSOR_DEFAULT='^[^[:alnum:]]*❯[^[:alnum:]]*$'
 # The menu detector anchors on **option 1 only**: it describes a behaviour (stop and
 # wait for the reset), which is stable across versions. Options 2/3 describe products
@@ -585,7 +585,7 @@ QUOTA_IDLE_CURSOR_DEFAULT='^[^[:alnum:]]*❯[^[:alnum:]]*$'
 # silent for 28 days.
 # 选单只锚**选项 1**：它描述行为（停下来等重置），跨版本稳定。
 # 选项 2/3 描述商品，随定价包装变——旧实现逐字锚 `2. Switch to usage credits`，
-# cc 改文案后整条分支哑了 28 天。
+# 客户端 改文案后整条分支哑了 28 天。
 QUOTA_MENU_OPT1_REGEX="${QUOTA_MENU_OPT1_REGEX:-Stop and wait for limit to reset}"
 QUOTA_MENU_FOOTER_REGEX="${QUOTA_MENU_FOOTER_REGEX:-Enter to confirm.*Esc to cancel}"
 QUOTA_MENU_NUMBERED_REGEX="${QUOTA_MENU_NUMBERED_REGEX:-^[[:space:]]*(›|❯|>)?[[:space:]]*[0-9]+\.[[:space:]]}"
@@ -611,10 +611,10 @@ fi
 # merged — the limit detector's "must be an **empty** cursor" is load-bearing (it is
 # the disproof invariant for "the CLI is idle with no dialog open"), and loosening it
 # reopens that false-positive.
-# 监控会话「就绪」判据必须比上面那条松：刚起的 cc composer 带占位提示
+# 监控会话「就绪」判据必须比上面那条松：刚起的 客户端 composer 带占位提示
 # （`❯ Try "edit <filepath> to..."`），含字母数字 → 严格的空 cursor 正则匹配不上，
 # 用它判就绪会永远超时。两条正则不能共用——撞限判据那边的「必须是**空** cursor」
-# 是承重的（它是"cc 闲置无框"的反证不变量），松了会重新打开假阳性。
+# 是承重的（它是"客户端 闲置无框"的反证不变量），松了会重新打开假阳性。
 QUOTA_COMPOSER_REGEX="${QUOTA_COMPOSER_REGEX:-^[[:space:]]*❯}"
 # Observable marker that the `/usage` panel is actually open. After pressing Enter
 # you must confirm it really opened before waiting for the numbers to refresh —
@@ -683,7 +683,7 @@ QUOTA_OAUTH_FALLBACK_MAX_AGE="${QUOTA_OAUTH_FALLBACK_MAX_AGE:-400}"   # about tw
 QUOTA_SESSION_WINDOW_HORIZON="${QUOTA_SESSION_WINDOW_HORIZON:-19800}"   # 5h + 30min margin / 5h + 30min 余量
 QUOTA_WEEK_WINDOW_HORIZON="${QUOTA_WEEK_WINDOW_HORIZON:-700000}"        # 7d + ~2h30m margin / 7d + 约 2h30m 余量
 
-# ── Fleet-wide capacity / 全账号合计容量 ────────────────────────────────
+# ── Capacity across all accounts / 全账号合计容量 ───────────────────────
 # The two quantities differ by two orders of magnitude in time constant and must be
 # read separately:
 #   weekly total   — strategic. It has a hard horizon (the weekly reset); once spent
@@ -735,7 +735,7 @@ QUOTA_CAPACITY_MIN_SPAN="${QUOTA_CAPACITY_MIN_SPAN:-1200}"        # spans under 
 QUOTA_RATIO_SEED="${QUOTA_RATIO_SEED:-0.120}"
 QUOTA_RATIO_MIN_FIVE="${QUOTA_RATIO_MIN_FIVE:-100}"   # accumulate this much dfive before trusting the measured value / 累计 Δfive 够这么多才改用实测值
 
-# ── Where Claude Code keeps its config / cc 的配置文件 ──────────────────
+# ── Where Claude Code keeps its config / 客户端 的配置文件 ──────────────────
 # Upstream defaulted to a literal `/root/.claude.json` in places, which assumes the
 # tool runs as root. It follows $HOME here.
 # 上游有几处写死 `/root/.claude.json`（假定以 root 运行）。这里一律跟随 $HOME。

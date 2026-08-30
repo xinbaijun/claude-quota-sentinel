@@ -11,7 +11,7 @@
 # ════════════════════════════════════════════════════════════════════════
 # Quota reading layer (single source of truth: the `cachedUsageUtilization`
 # that Claude Code itself writes)
-# 一、额度读数层（唯一真相源：cc 自己写的 cachedUsageUtilization）
+# 一、额度读数层（唯一真相源：客户端 自己写的 cachedUsageUtilization）
 # ════════════════════════════════════════════════════════════════════════
 
 # Read the snapshot and check its freshness. Returns JSON; non-zero when unusable.
@@ -1153,7 +1153,7 @@ quota_snapshot() {
 # quota_snapshot_fresh — 快照 + 新鲜度闸。陈旧一律 return 1（当「未知」，不动作）。
 quota_snapshot_fresh() {
   local now="$1" max_age snap ft
-  # 用可用窗口，不用 interval×factor：cc 的 /usage 拉取带缓存，轮询再密也拿不到更新的值，
+  # 用可用窗口，不用 interval×factor：客户端 的 /usage 拉取带缓存，轮询再密也拿不到更新的值，
   # 拿 interval 推出来的 120s 会把完全可用的读数一律判成陈旧、整个系统空转。
   max_age=$QUOTA_FETCH_MAX_AGE
   snap=$(quota_snapshot) || return 1

@@ -13,7 +13,7 @@
 # ════════════════════════════════════════════════════════════════════════
 # The monitor session — one dedicated Claude Code session that only ever sends
 # `/usage` and never talks to the model.
-# 二、监控会话（专用 cc 会话，只发 /usage，从不与模型对话）
+# 二、监控会话（专用 客户端会话，只发 /usage，从不与模型对话）
 # ════════════════════════════════════════════════════════════════════════
 
 # 🔻 CORRECTED (pipefail + SIGPIPE) — five functions in this file differ from the
@@ -69,7 +69,7 @@ quota_monitor_new_launch_id() {
 }
 
 # session_created + pane_id + pane_pid 是 tmux 容器身份。原 pane 内 `/exit` 时三者都必须
-# 保持不变；pane 被 respawn/替换虽然同名，也不能冒充一次成功的“只换 cc”。
+# 保持不变；pane 被 respawn/替换虽然同名，也不能冒充一次成功的“只换 客户端”。
 quota_monitor_pane_identity() {
   local identity
   identity=$(tmux display-message -p -t "$QUOTA_MONITOR_SESSION" \
@@ -205,7 +205,7 @@ quota_monitor_ensure() {
   quota_monitor_launch_in_pane
 }
 
-# 只退出 pane 内的 cc，不动 tmux session/window/pane。先拿到 composer 正证，再发
+# 只退出 pane 内的 客户端，不动 tmux session/window/pane。先拿到 composer 正证，再发
 # `/exit`；退出后回读 shell 与容器三元组，任何一步不确定都 fail closed。
 # 🔻 CORRECTED (pipefail/SIGPIPE) — see the note at the top of this file. / 见文件开头那段。
 quota_monitor_exit_to_shell() {
@@ -803,7 +803,7 @@ quota_monitor_prepare_owner() {
     quota_log "❌ monitor session has multiple panes/windows -> will neither read nor act on an unknown active pane"
     return 1
   elif quota_monitor_shell_ready; then
-    # tmux 是长寿容器，里面的 cc 可能已正常退出或启动失败。此时无需 `/exit`，直接在
+    # tmux 是长寿容器，里面的 客户端 可能已正常退出或启动失败。此时无需 `/exit`，直接在
     # 原 shell 拉起一代并绑定；否则 session 活着会掩盖 monitor 实际已死。
     quota_log "monitor tmux is alive but the CLI fell back to a shell -> relaunching in the same pane and rebinding"
     quota_monitor_restart "$cur_acct" "$cur_uuid" || return 1

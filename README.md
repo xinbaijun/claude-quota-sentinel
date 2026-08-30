@@ -20,7 +20,25 @@ the switching itself, which several other projects do more comfortably (see
 > 不能说明账号能不能用**——实测有账号显示「已过期 2 天」却好好的，也有显示「2 小时后
 > 才过期」却已经废了。如果你曾经按凭据过期时间给账号排过序，本仓讲的就是这一类事。
 
+> 🔴🔴 **THIS REPOSITORY MUST NEVER BE MADE PUBLIC — and a history rewrite would not
+> change that.** Its **git objects** contain real people's names (the working tree is
+> clean; the object layer is not). **`force-push` does not delete remote objects** — measured
+> on this repository: from a fresh clone, superseded commits fetched **by SHA** still come
+> back with their old contents. ⇒ **Any public release ships from a NEW repository whose
+> history is clean from its first commit.** Full reasoning and the range-by-range counts:
+> [docs/REDACTION.md](docs/REDACTION.md#never-public--本仓永不转-public).
+> 🔴🔴 **本仓永远不得转为 public——而且重写历史改变不了这一点。** 它的 **git 对象**里含
+> 真实人名（工作树是干净的，对象层不是）。**`force-push` 不删除远端对象**——本仓实测：
+> 从全新 clone 按 **SHA** 去 fetch 已被取代的 commit，旧内容照样取得出来。
+> ⇒ **任何公开发布都从一个全新仓推出，历史从第一个提交起就干净。**
+
 ## Quick start / 一分钟跑起来
+
+⚠️ The URL below is **this private repository**. It is here because a first screen needs a
+runnable command, not because you can clone it — a public release will live somewhere
+else, and **this line must be changed when that happens** (see the banner above).
+⚠️ 下面这个 URL 指向的是**这个私有仓**。它在这里是因为第一屏需要一条可运行的命令，
+不是因为你 clone 得到——公开版会在别处，**到那时这一行必须改**（见上面的横幅）。
 
 ```sh
 git clone https://github.com/xinbaijun/claude-quota-sentinel.git
@@ -52,20 +70,23 @@ time.
 而一份让你自己去发现这件事的 README 是在浪费你的时间。
 
 Nothing above writes a credential: `QUOTA_SWITCH_MODE` defaults to **dry-run**. The switch
-itself only happens with `QUOTA_SWITCH_MODE=on`, and [what it touches](#what-it-touches-and-how-to-audit-it-first--
-它会动你哪些文件怎么先审再用) is listed before you get there.
+itself only happens with `QUOTA_SWITCH_MODE=on`, and
+[what it touches](#what-it-touches-and-how-to-audit-it-first--它会动你哪些文件怎么先审再用)
+is listed before you get there.
 以上没有一条会写凭据：`QUOTA_SWITCH_MODE` 默认就是 **dry-run**。真正切号只在
 `QUOTA_SWITCH_MODE=on` 时发生，而
 「它会动你哪些文件」在你走到那一步之前就已经列在下面。
 
 **Requirements**: Linux only. `bash` >= 4.1, `jq`, `curl`; `tmux` and a logged-in
-`claude` for the panel reader; **`python3` >= 3.9 and `tzdata` for the switching half**
-(`account-switch` imports `zoneinfo` at module top level, so a missing `tzdata` fails at
-import — loudly, not silently). Full list, including what is *not* required and why:
-[docs/REQUIREMENTS.md](docs/REQUIREMENTS.md).
+`claude` for the panel reader; **`python3` >= 3.9 for the switching half** (3.9 is the
+floor because `zoneinfo` arrived there). **`tzdata` is a CONDITIONAL dependency — needed
+only if you set `QUOTA_FALLBACK_TZ` to a zone name**; left empty (the default) no
+time-zone database is consulted at all. Full list, including what is *not* required and
+why: [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md).
 **运行前提**：仅 Linux。`bash` >= 4.1、`jq`、`curl`；面板读数那条链另需 `tmux` 与已登录
-的 `claude`；**切号那一半另需 `python3` >= 3.9 与 `tzdata`**（`account-switch` 在模块顶层
-import `zoneinfo`，缺 `tzdata` 是 **import 期就崩**——响亮失败，不是静默降级）。
+的 `claude`；**切号那一半另需 `python3` >= 3.9**（3.9 是下限，因为 `zoneinfo` 从 3.9 才有）。
+**`tzdata` 是条件依赖——只有当你把 `QUOTA_FALLBACK_TZ` 设成区域名时才需要**；
+留空（默认）则完全不查时区库。
 
 ---
 
@@ -84,20 +105,47 @@ able to decide whether to trust it before you read anything else.
 | `$QS_STATE_DIR/switches.jsonl` | append | one line per switch decision, never rewritten / 每次切号决策一行，只追加不改写 |
 | `$QS_STATE_DIR/quota.log` | append | the human-readable log / 人读日志 |
 
+🔴 **It also starts a process, and the table above is a file table — so read this line too.**
+`read-once`, `monitor-ensure` and `monitor-restart` will **create and keep** a tmux session
+named `$QUOTA_MONITOR_SESSION` and run `$QUOTA_MONITOR_LAUNCH` in it (default
+`DISABLE_AUTOUPDATER=1 claude`). **That process stays alive after the command returns.**
+It is how the panel reader works, and it is not optional on that path.
+⚠️ **Sandboxing it with `HOME` does not work**, which is the first thing anyone tries —
+see **K14**. `tmux new-session` is called with no `-e`, so the process inherits the tmux
+**server's** environment, not yours.
+🔴 **它还会起一个进程，而上面那张是文件表——所以这一行也要读。**
+`read-once`、`monitor-ensure`、`monitor-restart` 会**创建并保持**一个名为
+`$QUOTA_MONITOR_SESSION` 的 tmux 会话，在里面跑 `$QUOTA_MONITOR_LAUNCH`（默认
+`DISABLE_AUTOUPDATER=1 claude`）。**命令返回之后那个进程还活着。**
+面板读数就是这么工作的，在那条路上它不是可选项。
+⚠️ **用 `HOME` 沙箱化它不管用**，而那正是所有人第一个会试的办法——见 **K14**。
+`tmux new-session` 调用时没有带 `-e`，所以那个进程继承的是 tmux **server** 的环境，不是你的。
+
 **Audit it before you let it act**, in this order:
 
 1. `./quota-sentinel env` — print the resolved configuration and every path it will use,
    **before** it uses any of them.
 2. `./quota-sentinel status` — read-only, touches no credential.
-3. `./quota-sentinel read-once` — dry-run by default; read `quota.log` for the
-   `🔎 dry-run: … would switch A -> B` line it produced.
+3. ⚠️ **STOP — this is the first step with a side effect, and it is a process, not a
+   file.** `./quota-sentinel read-once` is dry-run for *credentials*, but it will start a
+   tmux session running a real `claude` bound to whichever account the **tmux server's**
+   `HOME` points at — not necessarily the one `env` just printed. If you only want to look,
+   **steps 1, 2 and `./account-probe --json` already cover every read-only need**; stop
+   here until you have read **K14**.
+   Once you do run it: read `quota.log` for the `🔎 dry-run: … would switch A -> B` line,
+   then `tmux kill-session -t "$QUOTA_MONITOR_SESSION"` if you did not want a resident
+   session.
 4. `diff` the two credential files against a backup after your first real switch.
 5. `./quota-sentinel switches` — read the ledger back out.
 
-**先审再用**，按这个顺序：先 `env`（把它将要用的每一个路径先打出来给你看），
-再 `status`（只读），再 `read-once`（默认空跑，去 `quota.log` 里看它打出的
-`🔎 dry-run:` 那一行），第一次真切之后拿备份 `diff` 一下上面两个凭据文件，
-最后 `switches` 把流水账读出来。
+**先审再用**，按这个顺序：先 `env`（把它将要用的路径先打出来给你看），再 `status`（只读）。
+⚠️ **第 3 步 `read-once` 是第一个有副作用的步骤，而且副作用是一个进程不是一个文件**：
+它对**凭据**是空跑，但会起一个 tmux 会话、在里面跑一个真实 `claude`，
+而那个 `claude` 绑的是 **tmux server 的 `HOME`** 指向的账号——**不一定**是 `env` 刚打给你看的那个。
+只想看的话，**第 1、2 步加 `./account-probe --json` 已经覆盖全部只读需求**；
+在读完 **K14** 之前就停在这里。真要跑了之后：去 `quota.log` 看那行 `🔎 dry-run:`，
+不想留常驻会话就 `tmux kill-session -t "$QUOTA_MONITOR_SESSION"`。
+最后第一次真切之后拿备份 `diff` 两个凭据文件，再用 `switches` 把流水账读出来。
 
 **If it goes wrong**: every switch writes a timestamped backup *before* touching anything,
 and `account-switch --rollback` restores the most recent one. Take this seriously —
@@ -403,13 +451,18 @@ line reference is worse than none**.
   epoch integers, do that instead; all of this is the cost of parsing rendered human time.
   如果两端都归你、能约定用 epoch 整数，就用整数；上面这一整套是「解析给人看的时间」
   的代价。
-- ⚠️ **Scope**: this discipline covers the bash side. `account-switch` (Python) uses
-  `zoneinfo`, which is why `tzdata` is a hard dependency — **and that does not contradict
-  the rule**, because a missing `zoneinfo` raises loudly whereas a bare `TZ=` name degrades
-  silently, and silent degradation is what the rule exists to prevent.
-  ⚠️ **射程**：这条纪律覆盖 bash 那一侧。`account-switch`（Python）走 `zoneinfo`，
-  这正是 `tzdata` 成为硬依赖的原因——**这与本条不矛盾**：缺 `zoneinfo` 是**响亮失败**，
-  而裸 `TZ=` 名字是**静默回退**，本条防的正是静默回退。
+- ⚠️ **Scope**: this discipline covers the bash side. `account-switch` (Python) resolves a
+  zone database **only when you hand it a zone name** via `QUOTA_FALLBACK_TZ`, and when it
+  cannot resolve one it **fails loudly** (`SystemExit` plus a message naming both ways
+  out). The shell equivalent `TZ=<name> date` on the same machine **silently falls back to
+  UTC** — a plausible timestamp that is simply wrong by your offset. **That contrast is the
+  rule, not an exception to it**: what this discipline exists to prevent is silent
+  degradation, not failure.
+  ⚠️ **射程**：这条纪律覆盖 bash 那一侧。`account-switch`（Python）**只在你显式给了区域名**
+  （`QUOTA_FALLBACK_TZ`）时才去解析时区库，解析不到时**响亮失败**（`SystemExit` +
+  同时给出两条出路的文案）。而同一台机器上 shell 的 `TZ=<name> date` 会**静默回退 UTC**
+  ——给你一个看着合理、只是差了你那个偏移量的时刻。**这个对比正是本条纪律本身，
+  不是它的例外**：它防的是静默降级，不是失败。
 
 ### G-5 · Anchoring a predicate to someone else's UI text
 ### G-5 · 把判据锚在别人的 UI 文案上
@@ -546,9 +599,15 @@ line reference is worse than none**.
   **隐式的、没写下来、也没人守的**——有四个函数会摸真实会话，它们碰巧只从两条路进入，
   而那两条路的用例碰巧都打了桩。加了个新调用方，岔路变成大路，测试就走了进去。
 - **Instead / 正确做法** — three gates, none optional, all in `test/quota-sentinel.test.sh`:
-  ① a **construct-time** assertion that enumerates every state path variable and aborts
-  (`exit 3`) if any points at a real directory — it tests *"could this write"*, not
-  *"did it write"*; ② **default deny** — any session call that was not explicitly stubbed
+  ① a **construct-time** assertion that enumerates every `QUOTA_*` variable and aborts
+  (`exit 3`) under **either** of two predicates: the value points into the real state
+  directory, **or** it points somewhere under `$HOME` that is not the sandbox. It tests
+  *"could this write"*, not *"did it write"*.
+  ⚠️ The second predicate was added because the first was **structurally blind** to the two
+  most dangerous paths here — the credential files live under `$HOME` but *not* under the
+  state directory, so predicate ① could never warn about them, and that family was still
+  guarded only by each case remembering to redirect it. ⭐ The G-9 fix replaced enumeration
+  with a structural check, but the *predicate* of that check still covered one family only; ② **default deny** — any session call that was not explicitly stubbed
   is refused and recorded, and restoring a stub restores it to the gate, not to the real
   tool; ③ a **control on the gate itself** — one case deliberately violates it and asserts
   the violation was recorded.
@@ -786,20 +845,55 @@ build one.
   **怎么办**：跑 `tools/dod4-scan.sh` 并读它的分范围输出，并读 `docs/REDACTION.md`——
   那里写明了扫描器**结构上看不见**什么（与普通英文词撞名的那一类只能靠人工复核）。
 
-### K8 · `tzdata` is a hard dependency
-### K8 · `tzdata` 是硬依赖
+### K8 · `tzdata` is a conditional dependency, and the condition is one env var
+### K8 · `tzdata` 是条件依赖，条件就是一个环境变量
 
-- **When** — minimal container images, which frequently omit it.
-  **条件**：最小化容器镜像，它们常常不带。
-- **Looks like** — ⚠️ **a loud failure, not a silent one**: `account-switch` imports
-  `zoneinfo` at module top level, so it raises **at import time** — the switching half does
-  not start at all, rather than starting and being subtly wrong.
-  **表现**：⚠️ **响亮失败，不是静默失败**：`account-switch` 在模块顶层 import `zoneinfo`，
-  所以是 **import 期就抛**——切号那一半根本起不来，而不是起来了然后悄悄算错。
-- **How to tell** — run `./account-switch --help`. If it raises, this is it.
-- **What to do now** — install `tzdata`. Note this is the *good* kind of dependency
-  failure, and G-4 explains why: loud beats silent.
-  **怎么办**：装 `tzdata`。这是**好的**那种依赖失败，理由见 G-4：响亮胜过静默。
+- **When it bites / 什么条件下会坏** — you set `QUOTA_FALLBACK_TZ` to a **zone name**
+  (e.g. `Asia/Shanghai`) on a machine with no time-zone database — common on minimal
+  container images. Left empty (the default) this never bites, because no zone database is
+  consulted at all.
+  你在一台没有时区库的机器上（最小化容器镜像常见）把 `QUOTA_FALLBACK_TZ` 设成一个
+  **区域名**。留空（默认）永远碰不到这条，因为那条路根本不查时区库。
+- **What it looks like / 表现成什么样** — **every** invocation of `account-switch` exits
+  with `SystemExit` while resolving the display zone, and the message already names both
+  ways out. ⚠️ **`--help` is not affected**: the default-empty path never touches the
+  database, so `--help` returns 0 with an empty stderr even on a machine that has no
+  `tzdata` at all.
+  `account-switch` 的**每一次**调用都会在解析显示时区时 `SystemExit`，文案已经把两条出路
+  写给你了。⚠️ **`--help` 不受影响**：默认空值那条路根本不碰库，所以哪怕机器上完全没有
+  `tzdata`，`--help` 也是 exit 0、stderr 0 字节。
+- **How to tell it is this one / 怎么确认是不是这条** —
+  `QUOTA_FALLBACK_TZ=<the name you set> ./account-switch --list`.
+  ⚠️ **Do not use `--help` to test this** — it gives a **false negative**, for the reason
+  in the line above.
+  `QUOTA_FALLBACK_TZ=<你设的那个名字> ./account-switch --list`。
+  ⚠️ **不要用 `--help` 判**，理由见上一行：它会给你**假阴性**。
+- **What to do now / 现在怎么办** — install `tzdata`, or leave `QUOTA_FALLBACK_TZ` empty
+  and use the machine's local zone. Full table in
+  [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md).
+  装 `tzdata`，或把 `QUOTA_FALLBACK_TZ` 留空、用本机时区。完整表见 REQUIREMENTS。
+
+> ⚠️ **Why this entry used to be wrong, kept on purpose.** Until 2026-08-30 this entry
+> claimed `tzdata` was a **hard** dependency that failed **at import time**, and told you to
+> test it with `--help`. All three were false: `from zoneinfo import ZoneInfo` is a plain
+> stdlib import that never reads a database — the read happens on the `ZoneInfo(name)`
+> **call** — and on a machine with no zone database `--help` exits 0 with an empty stderr.
+> ⭐ The mechanism sentence read perfectly plausibly, which is exactly the failure shape
+> **G-4** is about; and `docs/REQUIREMENTS.md` in this same repository had already recorded
+> that prediction as overturned. This entry was written from the older material without
+> checking it against the repository it ships in. Kept here because the test this K-list
+> has to pass is *"after reading an entry you can answer whether it will bite you"* — and
+> an entry that tells you to run the one command that cannot detect the problem fails that
+> test in the most direct way possible.
+> ⚠️ **这一条以前为什么是错的，留在这里是有意的。** 到 2026-08-30 为止本条声称 `tzdata` 是
+> **硬**依赖、在 **import 期**抛，并叫你用 `--help` 去测。三件全假：
+> `from zoneinfo import ZoneInfo` 是纯 stdlib import，**从不读库**——读库发生在
+> `ZoneInfo(name)` 这次**调用**上；而在没有时区库的机器上 `--help` 是 exit 0、stderr 0 字节。
+> ⭐ 那段机制描述读起来完全合理，而这正是 **G-4** 讲的那个失效形状；何况**同一个仓**的
+> `docs/REQUIREMENTS.md` 早就把那个预测记成已被推翻。本条当时是照旧素材写的，
+> 没有拿它所在的这个仓核过一遍。留着，是因为 K 清单要过的判据是
+> 「**读完一条你能回答我会不会踩到**」——而一条叫你去跑唯一那条**测不出问题**的命令的条目，
+> 是以最直接的方式没过这个判据。
 
 ### K9 · The frozen control group is only pinned to itself
 ### K9 · 冻结对照组只跟自己对得上
@@ -901,6 +995,59 @@ build one.
   读它「本来会怎么做」，再让它动手。上面提到的接受线缺口会缩小防抖余量，
   它是一个**可能的**促成因素，但**没有被证明是原因**——写成原因就正好犯了
   「一个能解释你手上数据的机制，和造成它的机制，是两件事」那个错。
+
+### K14 · The isolation you set up does not reach the monitor half
+### K14 · 你设的隔离到不了 monitor 那一半
+
+- **When it bites / 什么条件下会坏** — you try to confine this tool to a sandbox, or to a
+  non-default account, by setting environment variables before running it. This is the
+  first thing anyone does, and it is what the audit steps above tell you to do.
+  你想把这个工具限制在一个沙箱、或一个非默认账号里跑，办法是运行前设环境变量。
+  这是所有人第一个会做的事，也正是上面那几步审计教你做的事。
+- **What it looks like / 表现成什么样** — the **bash half obeys you**: `QS_STATE_DIR`,
+  `QUOTA_CLAUDE_JSON`, `QUOTA_STATE` all take effect, and `quota-sentinel env` prints
+  exactly the values you set. The **monitor half does not**: it is started through
+  `tmux new-session`, which is called with **no `-e`**, so the process inherits the tmux
+  **server's** environment. `HOME` is not in tmux's `update-environment` list, so the
+  `claude` it runs uses the server's `HOME` — i.e. **a different account from the one you
+  just configured**, reading that account's real `/usage` panel.
+  ⭐ **Nothing reports an error, and `env` keeps printing your value.** The command exits 0.
+  **bash 那一半听你的**：`QS_STATE_DIR`、`QUOTA_CLAUDE_JSON`、`QUOTA_STATE` 都生效，
+  `quota-sentinel env` 打出来的正是你设的值。**monitor 那一半不听**：它经
+  `tmux new-session` 起，而那一行**没有 `-e`**，于是进程继承 tmux **server** 的环境。
+  `HOME` 不在 tmux 的 `update-environment` 列表里，所以它跑的那个 `claude` 用的是
+  server 的 `HOME`——**也就是另一个账号**，读的是那个账号的真实 `/usage` 面板。
+  ⭐ **没有任何报错，而且 `env` 照样打你设的那个值。** 命令 exit 0。
+- **How to tell it is this one / 怎么确认是不是这条** —
+  ```sh
+  pid=$(tmux list-panes -t "$QUOTA_MONITOR_SESSION" -F '#{pane_pid}')
+  tr '\0' '\n' < /proc/$pid/environ | grep '^HOME='
+  ```
+  If that `HOME` is not the one you set, this is it.
+  如果那个 `HOME` 不是你设的那个，就是这条。
+- **What to do now / 现在怎么办** — pass the environment explicitly on the session
+  (`tmux new-session -e HOME=… -e …`), or start a tmux server that already has the
+  environment you want, and only then run this tool.
+  ⚠️ **Until you have done one of those, do not treat "I set `HOME`" as isolation.**
+  在会话上显式传环境（`tmux new-session -e HOME=… -e …`），
+  或者先起一个环境就对的 tmux server，再跑这个工具。
+  ⚠️ **在做到之前，不要把「我设了 `HOME`」当成隔离。**
+- ⭐ **Why this is stated as a broken assumption rather than a tip**: the failure is
+  silent, and every signal you would normally check agrees with you. This repository's own
+  regression suite is only safe from it because of a **global default-deny tmux gate**
+  (see **G-9** gate ②) — **there is no equivalent gate on the product side.** The lesson
+  G-9 records ("isolation was implicit, unwritten and unguarded") was closed **in the
+  tests** and is still open **in the tool**.
+  ⭐ **为什么写成「你的前提不成立」而不是一条提示**：这个失效是静默的，而你通常会去核的
+  每一个信号都和你说的一样。本仓自己的回归之所以不出事，靠的是一道**全局默认拒绝的
+  tmux 闸**（见 **G-9** 第②道）——**产品侧没有对应的闸**。G-9 记下的那句教训
+  （「隔离此前是隐式的、没写下来、也没人守的」）在**回归里**被收口了，在**工具里**还开着。
+- ⚠️ **Scope / 射程**: this entry documents the behaviour; it does **not** change it.
+  Whether the launch path should pass the environment explicitly is a change to a running
+  mechanism and is deliberately left as an open item rather than slipped into a
+  documentation milestone.
+  ⚠️ 本条**只记录**这个行为，**不改**它。启动路径该不该显式传环境属于改动在跑机制，
+  **有意**留作公开未达项，而不是塞进一个文档里程碑里顺手改掉。
 
 ### K-gap · Guards that did not come across / 没有随抽取过来的守卫
 
@@ -1128,13 +1275,25 @@ are published.
 
 The full list, with what is **not** required and why, is in
 [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md). Short version: `bash` >= 4.1, `jq`, plus
-`tmux` and a logged-in `claude` for the panel reader and `curl` for the OAuth reader.
-Linux only; macOS and Windows are **unverified**, and that document names the specific
-GNU-only flags that would break there rather than leaving it vague.
+`tmux` and a logged-in `claude` for the panel reader and `curl` for the OAuth reader, plus
+**`python3` >= 3.9 for the switching half** (`account-switch`). **`tzdata` only if you set
+`QUOTA_FALLBACK_TZ` to a zone name** — left empty, the default, no zone database is
+consulted. Linux only; macOS and Windows are **unverified**, and that document names the
+specific GNU-only flags that would break there rather than leaving it vague.
 完整清单（含**不需要**什么、为什么）见 [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)。
 短版：`bash` >= 4.1、`jq`，面板读数那条链另需 `tmux` 与已登录的 `claude`，
-OAuth 直查另需 `curl`。只保证 Linux；macOS 与 Windows**未验证**，
+OAuth 直查另需 `curl`，切号那一半另需 **`python3` >= 3.9**（`account-switch`）。
+**`tzdata` 仅当你把 `QUOTA_FALLBACK_TZ` 设成区域名时才需要**——留空（默认）不查时区库。
+只保证 Linux；macOS 与 Windows**未验证**，
 该文档写明了具体会在哪些 GNU 专有 flag 上坏，而不是含糊带过。
+
+⚠️ This short version and the one under [Quick start](#quick-start--一分钟跑起来) must
+agree. They did not until 2026-08-30: this one omitted `python3` entirely while that one
+called `tzdata` a hard dependency. **Two statements of one fact means at least one of them
+is false** — if you edit either, edit both.
+⚠️ 本短版与 Quick start 下那一份**必须一致**。在 2026-08-30 之前它们不一致：
+这一份完全没提 `python3`，那一份把 `tzdata` 写成硬依赖。
+**同一个事实写两处，就意味着至少有一处是假的**——改一处就得改两处。
 
 ## Provenance / 抽取来源
 

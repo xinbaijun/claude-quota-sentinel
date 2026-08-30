@@ -238,10 +238,25 @@ ck "$([ "$a_bin" -eq 0 ] && echo 1 || echo 0)" ADDR-BIN \
 #    `/proc/<pid>/environ` is readable only by the same UID. The accurate claim is
 #    "no longer readable by ANY user", NOT "the address is no longer exposed". On a box
 #    where you are root anyway, root could always read `environ`.
+# ⚠️ `ps -eo args` samples the WHOLE system, so this assertion has three sensitivity
+#    controls above it and **no specificity control**: it cannot tell "our process leaked an
+#    address" from "some unrelated process on this machine happens to contain a string that
+#    matches". On a shared host that is a false red pointing at this repository.
+#    ⇒ The judgement is not weakened; the DIAGNOSIS printed with it is. A tool should report
+#    what it observed and let the reader see whether the hit is even ours.
+# ⚠️ `ps -eo args` 采的是**全系统**，所以这条断言上面有三条灵敏度控制、**没有特异性控制**：
+#    它分不出「我们的进程漏了地址」与「这台机器上某个无关进程恰好含一个匹配的串」。
+#    在共享宿主上那就是一次指向本仓的假红。
+#    ⇒ 不弱化判据，弱化的是它给人的那句话：工具该报**观测**，并让读的人看得出这次命中
+#    是不是我们自己的。
 a_ps=$(/usr/bin/grep -acE "$ADDR_RE" "$SAMPLES")
+a_ps_detail=""
+if [ "$a_ps" -gt 0 ]; then
+  a_ps_detail=$(/usr/bin/grep -aoE ".{0,40}$ADDR_RE.{0,40}" "$SAMPLES" | sort -u | head -3 | tr '\n' '|')
+fi
 ck "$([ "$a_ps" -eq 0 ] && echo 1 || echo 0)" ADDR-PS \
    "no account address on any sampled process command line" \
-   "sightings=$a_ps"
+   "sightings=$a_ps ; matched: ${a_ps_detail:-none} ; NOTE: this sampler reads ps -eo args for the WHOLE system. If the matched text does not belong to a process THIS run started, it is a bystander hit on a shared host, not a leak from this repository -- check the pid before treating it as one."
 
 a_jq=$(/usr/bin/grep -acE "$ADDR_RE" "$JQARGV")
 ck "$([ "$a_jq" -eq 0 ] && echo 1 || echo 0)" ADDR-JQ \

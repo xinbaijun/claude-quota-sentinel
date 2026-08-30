@@ -45,7 +45,13 @@
 #   account-probe --home <dir>     # probe the account whose credentials live under <dir>
 #   account-probe --json           # machine-readable
 #   account-probe --snapshot       # write the machine-readable snapshot quota-sentinel reads
-#   account-probe --no-oauth       # disable the direct query (it is on by default)
+#   account-probe --oauth          # force the direct query on (it is on by default)
+#   account-probe --no-oauth       # disable the direct query
+# ⚠️ This block IS `--help`: the implementation prints it with sed. So a flag missing here
+#    is a flag missing from --help, and anything anchored on "--help lists them all" then
+#    becomes false. `--oauth` was missing until 2026-08-30.
+# ⚠️ 这一段**就是** `--help`：实现是用 sed 把它打出来。所以这里少一个 flag，`--help`
+#    就少一个，任何锚在「--help 列全了」上的说法都会跟着变假。`--oauth` 一直漏到 2026-08-30。
 #
 # ⚠️ Without a live refresh, **an account whose token has already expired cannot be
 #    read**: the server answers 429 for an expired token. The wording says rate limit;
@@ -396,7 +402,7 @@ if (( WANT_JSON )); then
   printf '%b' "$rows" | QS_JQ_CUR="$HOST_ACCOUNT" jq -R -s '
     split("\n") | map(select(length>0) | split("\t")
     | {email:.[0], home:.[1], five_hour:.[2], seven_day:.[3],
-       five_reset:.[4], week_reset:.[5], health:.[6], quota_note:.[7],
+       five_reset:.[4], week_reset:.[5], quota_note:.[7],
        is_current:(.[0]==$ENV.QS_JQ_CUR)})'
   exit 0
 fi

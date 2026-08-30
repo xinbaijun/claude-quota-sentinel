@@ -10,9 +10,21 @@
 # 三、兜底 UI 判据（只在 /usage 拿不到时使用；每个都可用 CLI 单独喂文本验证）
 # ════════════════════════════════════════════════════════════════════════
 
+# quota_menu_present — is the rate-limit menu currently live?
+# The test is "structure + behavioural meaning", NOT "these three sentences verbatim":
+#   ① no empty `❯` in the last 10 lines (a live menu has replaced the composer; a `❯`
+#      present means the client is idle and what is on screen is dead text)
+#   ② a footer in the last 8 lines (a live menu's footer is the pane's bottom chrome; a
+#      dead scrollback copy has its footer pushed out of the window)
+#   ③ "Stop and wait for limit to reset" in the last 20 lines — it describes BEHAVIOUR,
+#      which is stable across versions
+#   ④ at least 2 numbered items in the last 20 lines — **the wording is deliberately not
+#      inspected**, because options 2 and 3 are product names and those change
+#      (that is exactly the incident this whole file exists because of)
+#
 # quota_menu_present — 撞限选单是否活着
 # 判据是「结构 + 行为语义」，不是「三条原文逐字」：
-#   ① 末 10 行无空 ❯（活选单替换了 composer；有 ❯ = cc 闲置，屏上那段是死文本）
+#   ① 末 10 行无空 ❯（活选单替换了 composer；有 ❯ = 客户端闲置，屏上那段是死文本）
 #   ② 末 8 行有 footer（活选单的 footer 是 pane 最底 chrome；scrollback 死文本的 footer 会被顶出窗）
 #   ③ 末 20 行有「Stop and wait for limit to reset」——描述行为，跨版本稳定
 #   ④ 末 20 行至少有 2 个编号项——**不看文案**，因为选项 2/3 是商品名会变
@@ -48,24 +60,43 @@ quota_menu_present() {
   (( n >= 2 ))
 }
 
+# quota_banner_present — detect a rate-limit banner and report how strong the evidence is.
+# echoes "strict" / "weak"; return 1 = no banner at all.
+#
+# Why the evidence is graded: the old implementation counted a banner as a real limit hit
+# whenever that sentence appeared anywhere after the last output block in the pane. The
+# consequence was that **any session discussing a rate limit judged itself to be rate
+# limited**. Hit live: a user QUOTED the banner text in conversation as an illustration,
+# and the watcher immediately opened an episode for that session and pushed three false
+# "quota restored" messages into it; another session that was busy ANALYSING rate-limit
+# logs was pulled in the same way.
+#
+#   strict = structural evidence of a real banner: the client renders it as a `⎿` sub-line
+#            (its shape after the menu is dismissed with Esc)
+#   weak   = a text match only -> **must be cross-checked against /usage** before it may be
+#            believed (see quota_banner_confirmed)
+# Three disproofs; matching any one of them means this is NOT a banner:
+#   ① the line starts with `❯` = a USER INPUT line. The client renders user messages as
+#      `❯ <text>`, and whatever is being typed in the composer has the same shape. A real
+#      banner is only ever a `⎿` sub-line or body text of a `●` block, and never hangs off
+#      a `❯` line. The self-trigger incident above landed exactly here.
+#   ② before the last top-level `●` block = an old banner already superseded by later output
+#   ③ after the composer blank line = the input area at the bottom of the screen
+#
 # quota_banner_present — 撞限横幅检测，输出证据强度
 # echo "strict" / "weak"；return 1 = 完全没有。
 #
 # 为什么要分强弱：旧实现只要 pane 里「最后一个 ● 块之后」出现这句话就算撞限，于是
-# **任何讨论撞限的会话都会把自己判成撞限**。2026-08-11 活体实撞：用户在对话里引用了
-# a line like "You've hit your session limit · resets 3:10pm (Asia/Shanghai)" as an example, and the reader
-# 当场给该会话建了 episode、发了三次伪「额度已恢复」，同期另一个正在分析撞限日志的
-# 会话也被同样抓进队列。
+# **任何讨论撞限的会话都会把自己判成撞限**。活体实撞：用户在对话里**引用**了那句横幅
+# 原文作说明，监控当场给该会话建 episode、发了三次伪「额度已恢复」；
+# 同期另一个正在分析撞限日志的会话也被同样抓进队列。
 #
-#   strict = 真横幅的结构证据：cc 把它渲染成 `⎿` 子行（Esc 退单后的形态）
+#   strict = 真横幅的结构证据：客户端把它渲染成 `⎿` 子行（Esc 退单后的形态）
 #   weak   = 只有文本命中 → **必须与 /usage 交叉验证**才可采信（见 quota_banner_confirmed）
 # 三道否证（任一命中即不是横幅）：
-#   ① 横幅所在行以 `❯` 开头 = **用户输入行**。cc 把用户消息渲染成 `❯ <正文>`，
+#   ① 横幅所在行以 `❯` 开头 = **用户输入行**。客户端把用户消息渲染成 `❯ <正文>`，
 #      composer 里正在打的字也是这个形态；真横幅只会是 `⎿` 子行或 `●` 块正文，
-#      永远不会挂在 `❯` 行上。2026-08-11 那次自激正是撞在这里——用户在对话里引用了
-#      一句 "You've hit your session limit · resets 3:10pm (Asia/Shanghai)" 作说明，
-#      旧判据当场给该会话建 episode、发了三次伪「额度已恢复」；同期另一个正在分析
-#      撞限日志的会话也被同样抓进队列。
+#      永远不会挂在 `❯` 行上。上面那次自激正是撞在这里。
 #   ② 在最后一个顶级 ● 块之前 = 已被后续输出盖过的旧横幅
 #   ③ 在 composer 空行之后 = 屏幕最底部的输入区
 quota_banner_present() {
@@ -76,7 +107,7 @@ quota_banner_present() {
       if ($0 ~ re) { lastban=NR; banline=$0 } }
     END {
       if (lastban == "") exit 1
-      if (banline ~ /^[[:space:]]*❯/) exit 1              # 用户输入行，不是 cc 的横幅
+      if (banline ~ /^[[:space:]]*❯/) exit 1              # 用户输入行，不是 客户端 的横幅
       if (lastdot != "" && lastban < lastdot) exit 1      # 旧横幅，已被新输出盖过
       if (lastcur != "" && lastban > lastcur) exit 1      # 在输入行之后
       if (banline ~ /^[[:space:]]*⎿/) { print "strict"; exit 0 }

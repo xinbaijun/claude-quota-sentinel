@@ -68,6 +68,43 @@ everywhere else — which is its own kind of defect in a tool other people run.
 | a specific Docker container and its mount path | not extracted in this milestone |
 | the private environment's root, marker file, shim names and env prefix, hard-coded in the cleanroom checks | six declared inputs, each fail-closed when unset |
 
+### Dates: what is kept, what is removed / 日期：留什么、删什么
+
+⚠️ **A rule, because residue with a rule is a decision and residue without one is an
+omission — and they read identically.** De-site-specification here removed **coordinates**,
+not evidence.
+
+**Kept** — a date that serves as an incident's *identity*, and every measured quantity
+(counts, percentages, durations, rates). Those are what make a guard's justification
+checkable, and deleting them would leave behind an unfalsifiable anecdote.
+**Removed** — anything that lets a specific day be tied to a specific machine or person:
+precise clock times (`16:11:51`), timestamp ranges naming a single incident window, and
+internal role names (who decided, who reported).
+
+**Residue, counted rather than implied**: `YYYY-MM-DD` appears **105** times across the
+shipped files and docs, of which **89** are `2026-08-*`. That is deliberate under the
+rule above — they are incident identities in comments and in this file's own change log.
+⚠️ **This is not a claim that the class was cleared.** An earlier delivery report said
+"11 date/time coordinates removed", which is a removal count and was accurate as such; it
+is restated here with the remaining total so that neither number can be read as the other.
+
+### 日期：留什么、删什么
+
+⚠️ **要有规则，因为有规则的残留是决定，没规则的残留是漏做——而这两者读起来一模一样。**
+这里的去现场化删的是**坐标**，不是证据。
+
+**留**：作为事故**身份**的日期，以及全部测量值（次数、百分比、时长、速率）。
+它们是让一条守卫的理由可核对的东西，删掉只会剩下一个无法否证的传闻。
+**删**：任何能把某一天与某台机器或某个人对上的东西——精确时刻（如 `16:11:51`）、
+点名某次事故窗口的时间区间、以及内部角色名（谁拍的板、谁报的）。
+
+**残留量，是数出来的不是暗示的**：交付文件与文档里 `YYYY-MM-DD` 共 **105** 处，
+其中 `2026-08-*` **89** 处。按上面那条规则，这是有意保留的——它们是注释里的事故身份，
+以及本文件自己的变更记录。
+⚠️ **这不是在声称这一类已经清空。** 早先的交付报告写「删掉 11 处日期与精确时刻」，
+那是一个**删除计数**、作为计数它是准确的；这里连同**剩余总量**一起重述，
+好让两个数不会被读成对方。
+
 ## How to check it stayed removed / 怎么核实它没回来
 
 ```sh
@@ -208,8 +245,9 @@ answer down** rather than leaving the scanner's silence to speak for it.
 以及一条把某个名字举例出来、等于披露它在内部命令名单上的注释），两处均已修。
 **正则永远抓不到它们。**
 
-### Never public — real names in this repository's git objects
-### 本仓永不转 public —— git 对象里有真实人名
+### Never public / 本仓永不转 public
+
+**Real names are in this repository's git objects.** / **本仓的 git 对象里有真实人名。**
 
 ⚠️ **Status: present, accepted, not processed, and it changes what this repository may be
 used for.** This is a **standing constraint on whoever reads this next**, not a note about
