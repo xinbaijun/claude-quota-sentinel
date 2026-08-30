@@ -33,9 +33,13 @@
 #    docs/PROVENANCE.md「相对基线做了订正」。五个函数各自的定义处都有一行标记。
 quota_monitor_alive() { tmux has-session -t "$QUOTA_MONITOR_SESSION" 2>/dev/null; }
 
+# The dedicated monitor's session name is used throughout as a pane target, so the session
+# must stay single-pane. The moment somebody adds a window or a pane, a session target
+# starts drifting with the active pane -- at which point it is better to stop reading than
+# to scatter `/exit`, a new client and `/usage` across different panes.
 # 专用 monitor 的 session 名一直被当作 pane target 使用，因此它必须维持单 pane。
 # 一旦有人加 window/pane，session target 会随 active pane 漂移；此时宁可停读也不把
-# `/exit`、新 cc 和 /usage 分发到不同 pane。
+# `/exit`、新客户端和 /usage 分发到不同 pane。
 quota_monitor_single_pane_id() {
   local panes
   panes=$(tmux list-panes -s -t "$QUOTA_MONITOR_SESSION" -F '#{pane_id}' 2>/dev/null) || return 1
@@ -43,7 +47,11 @@ quota_monitor_single_pane_id() {
   printf '%s\n' "$panes"
 }
 
-# tmux session 在原 pane 内换 cc 时不会换 session_created，因此再钉一个 cc 启动代际。
+# Replacing the client inside the same pane does not change the tmux session_created, so a
+# separate client launch generation is pinned as well. It is written both to a tmux user
+# option (live proof) and to quota-state (owner proof); if the two disagree, the frame is
+# rejected.
+# tmux session 在原 pane 内换客户端时不会换 session_created，因此再钉一个启动代际。
 # 它同时写到 tmux user option（live proof）和 quota-state（owner proof）；两边不同即拒帧。
 quota_monitor_live_launch_id() {
   local launch_id
@@ -85,7 +93,9 @@ quota_monitor_shell_ready() {
 quota_monitor_ready() {
   local t
   quota_monitor_shell_ready && return 1
-  # 只看当前可见屏，不把上一代 cc 留在 tmux history 里的旧 composer 当成新进程已就绪。
+  # Look only at the currently visible screen. An older client's composer left behind in
+  # tmux history must not be mistaken for the new process being ready.
+  # 只看当前可见屏，不把上一代客户端留在 tmux history 里的旧 composer 当成新进程已就绪。
   t=$(tmux capture-pane -t "$QUOTA_MONITOR_SESSION" -p 2>/dev/null) || return 1
   grep -q 'Is this a project you created or one you trust' <<<"$t" && return 1
   local t12; t12=$(printf '%s\n' "$t" | tail -12)
@@ -100,7 +110,9 @@ quota_monitor_wait_ready() {
   (( attempts > 0 )) || attempts=1
   for (( i=0; i<=attempts; i++ )); do
     t=$(tmux capture-pane -t "$QUOTA_MONITOR_SESSION" -p 2>/dev/null || true)
-    # 首次进新目录 cc 会弹信任框；只在确认是信任框时才回车，不盲拍。
+    # Entering a new directory for the first time raises a trust prompt. Press Enter only
+    # once it is confirmed to BE the trust prompt -- never blind-fire a keystroke.
+    # 首次进新目录客户端会弹信任框；只在确认是信任框时才回车，不盲拍。
     if grep -q 'Is this a project you created or one you trust' <<<"$t"; then
       tmux send-keys -t "$QUOTA_MONITOR_SESSION" Enter 2>/dev/null
     elif ! quota_monitor_shell_ready \
@@ -113,7 +125,10 @@ quota_monitor_wait_ready() {
   return 1
 }
 
-# 在现有 tmux pane 的 shell 中启动一代新 cc。先写 live launch id，再把同一个 id 固化
+# Start a new client generation in the shell of an existing tmux pane. Write the live
+# launch id first, then freeze that same id into the statusLine callback; if the start
+# fails, state still holds the old id and the owner guard fails closed.
+# 在现有 tmux pane 的 shell 中启动一代新客户端。先写 live launch id，再把同一个 id 固化
 # 进 statusLine callback；启动失败时 state 仍是旧 id，owner guard 会 fail closed。
 quota_monitor_launch_in_pane() {
   local launch_identity launch_email="" launch_uuid="" launch_usage_uuid=""
@@ -143,8 +158,12 @@ quota_monitor_launch_in_pane() {
   launch_cmd=$(quota_monitor_launch_command "$launch_email" "$launch_uuid" "$launch_gen" "$launch_id")
   tmux set-option -q -t "$QUOTA_MONITOR_SESSION" "$QUOTA_MONITOR_LAUNCH_OPTION" \
     "$launch_id" 2>/dev/null || return 1
+  # Clear the previous generation's UI from the visible screen; tmux history and the
+  # separate raw-frame log are both kept. This stops the ready test from matching the old
+  # composer while the new client is still starting. C-u first clears any half-typed line
+  # left in the shell, so a retry cannot concatenate two launch commands into one.
   # 清掉可见屏中的上一代 UI；tmux history 与独立原始帧日志都保留。这样 ready 判据不会
-  # 在新 cc 尚未起来时误命中旧 composer。C-u 先清 shell 残留半行，避免重试时把两条
+  # 在新客户端尚未起来时误命中旧 composer。C-u 先清 shell 残留半行，避免重试时把两条
   # launch 命令拼接起来执行。
   tmux send-keys -t "$QUOTA_MONITOR_SESSION" C-u 2>/dev/null || return 1
   sleep 0.2
@@ -161,6 +180,8 @@ quota_monitor_launch_in_pane() {
   QUOTA_MONITOR_STARTED_UUID=$launch_uuid
 }
 
+# Prefer reusing an existing pane as the container; create a tmux session only when one
+# does not already exist.
 # 优先把已有 pane 用作容器；只有 tmux session 本来就不存在时才创建一次。
 quota_monitor_ensure() {
   if quota_monitor_alive && ! quota_monitor_single_pane_id >/dev/null; then
@@ -175,6 +196,8 @@ quota_monitor_ensure() {
     quota_monitor_single_pane_id >/dev/null || {
       quota_log "❌ the newly created monitor session is not a single unique pane"; return 1; }
   elif ! quota_monitor_shell_ready; then
+    # It may simply still be starting from the previous round. Give it the normal ready
+    # budget first; do not blindly push another launch command at it.
     # 可能是上一轮仍在启动；先给它原有 ready 预算，不盲目再塞一条启动命令。
     quota_monitor_wait_ready && return 0
     return 1
@@ -193,6 +216,8 @@ quota_monitor_exit_to_shell() {
   [[ "$exit_sec" =~ ^[0-9]+$ ]] || exit_sec=15
   before=$(quota_monitor_pane_identity) || return 1
   if quota_monitor_panel_open && ! quota_monitor_dismiss; then
+    # For the rare stuck-UI state, allow one interrupt -- but still require a composer to
+    # appear afterwards. Never kill the tmux session outright.
     # 极少数 UI 卡态给一次中断机会，仍要求随后出现 composer；绝不直接 kill tmux。
     tmux send-keys -t "$QUOTA_MONITOR_SESSION" C-c 2>/dev/null || return 1
     sleep 1
@@ -246,6 +271,9 @@ quota_reset_later_window() {
   (( candidate - baseline > QUOTA_RESET_DISPLAY_SKEW ))
 }
 
+# quota_window_sample_relation — for one window, how the candidate relates to the current
+# best. Emits new/same/old. A 0% reading with no reset means a new inactive window ONLY
+# when the old reset has already expired.
 # quota_window_sample_relation — 单个窗口里 candidate 相对 best 的窗口关系。
 # 输出 new/same/old；0% 且无 reset 只在旧 reset 已到期时代表新 inactive 窗口。
 quota_window_sample_relation() {
@@ -273,6 +301,11 @@ quota_window_sample_relation() {
   printf 'old\n'
 }
 
+# quota_panel_sample_better — within one network-refresh sampling window, is the candidate
+# frame newer than the current best?
+# It is a pure predicate so that both 66@4:00 -> 77@3:59 and its reverse can be pinned into
+# the regression suite. Miss an edit here and the wrong cached frame gets picked WITHIN a
+# single round, even while the cross-round stale guard is working correctly.
 # quota_panel_sample_better — 同一次网络刷新采样期间，候选帧是否比当前 best 更新。
 # 抽成纯判据是为了把 66@4:00 -> 77@3:59 及逆序都钉进回归；若把这里漏改，
 # 即使跨轮 stale guard 正确，也会先在单轮内选错缓存帧。
@@ -284,6 +317,8 @@ quota_panel_sample_better() {
   if (( $# >= 8 )); then candidate_wreset="$7"; best_wreset="$8"; fi
   [[ "$candidate_five" =~ ^[0-9]+$ && "$candidate_week" =~ ^[0-9]+$ \
      && "$best_five" =~ ^[0-9]+$ && "$best_week" =~ ^[0-9]+$ ]] || return 1
+  # The six-argument legacy call keeps its original semantics, for compatibility with the
+  # existing pure-predicate tests and with external callers that source this file.
   # 六参数旧调用保留原语义，供已有纯判据测试与外部 source caller 兼容。
   if [[ "$candidate_wreset" == "__not_supplied" ]]; then
     five_relation=$(quota_window_sample_relation \
@@ -300,6 +335,8 @@ quota_panel_sample_better() {
     "$candidate_wreset" "$candidate_week" "$best_wreset" "$best_week")
   [[ "$five_relation" == "old" || "$week_relation" == "old" ]] && return 1
   if [[ "$five_relation" == "new" || "$week_relation" == "new" ]]; then
+    # If the other axis is still in the same window it may not go backwards; when both
+    # axes change window at once, both are allowed to drop to zero.
     # 另一维若仍在同窗就不得倒退；两维同时换窗则都可归零。
     [[ "$five_relation" != "same" || "$candidate_five" -ge "$best_five" ]] || return 1
     [[ "$week_relation" != "same" || "$candidate_week" -ge "$best_week" ]] || return 1
@@ -322,6 +359,9 @@ quota_frame_stale() {
   local acct="$1" five="$2" week="$3" s_reset="$4" w_reset="$5" now
   now=$(date +%s)
 
+  # (1) Window already expired: the five-hour reset lies in the past, so this frame is a
+  #     leftover cache from the PREVIOUS window. Independent of which account it is
+  #     (the horizon clamp guarantees an expired window parses to a past epoch).
   # (1) 窗口已过期：五小时 reset 落在过去，说明这一帧是上一个窗口留下的缓存。
   #     这条与账号无关（视界钳制保证过期窗口会解析成过去的 epoch）。
   if [[ "$s_reset" =~ ^[0-9]+$ ]] && (( s_reset <= now )); then
@@ -330,6 +370,8 @@ quota_frame_stale() {
 
   local last_acct last_five last_week last_sr last_wr
   last_acct=$(quota_state_get '.account' "")
+  # Different accounts are not comparable: the first read after a switch is, by design, an
+  # independent reading belonging to a different account.
   # 账号不同不可比：切号后第一次读本来就该是另一个账号的独立读数
   [[ -n "$last_acct" && "$last_acct" == "$acct" ]] || return 1
   last_five=$(quota_state_get '.five_hour' "")
@@ -337,15 +379,29 @@ quota_frame_stale() {
   last_sr=$(quota_state_get '.five_reset_ts' "")
   last_wr=$(quota_state_get '.week_reset_ts' "")
 
+  # ⚠️ The BASELINE itself has to be trustworthy first. The last confirmed five_reset_ts
+  # may be **a bad value written by older buggy code** (without the horizon clamp,
+  # "Resets 2:10am" parsed to a day later), or may come from a window that ended long ago.
+  # Validate it against the same physical fact: a five-hour window's reset is necessarily
+  # within five hours. Anything else is not a legal current-window boundary and is treated
+  # as "no baseline at all".
+  # Hit live: state held a reset 14.5 hours away, which made the panel's TRUE value look
+  # like "an older window". Every frame the new poller produced was rejected and no reading
+  # could get in at all.
+  # ⚠️ An invalid baseline reset means the last confirmed reading belongs to a **finished
+  # window**, so its percentage is void as well. Voiding only the reset and keeping the
+  # percentage for a monotonicity comparison is wrong. Hit live: after an account reset,
+  # the top level still held the old window's five=100, and the new window's true 20% was
+  # rejected as "100 -> 20 went backwards" -- the readings starved.
   # ⚠️ 基准本身必须先可信。上次确认的 five_reset_ts 可能是**旧 buggy 代码写下的坏值**
   # （无视界钳制时会把 "Resets 2:10am" 解析成一天以后），或来自早已结束的窗口。
   # 用同一条物理事实校验它：五小时窗口的 reset 必然在 5 小时以内，否则不是合法的
-  # 当前窗口边界，一律当"没有基准"处理。
-  # 2026-08-12 11:38 活体实撞：state 里存着 08-13 02:10（距今 14.5h），把面板的真值
-  # 08-12 12:10 判成了"更旧的窗口"，新 poller 每一帧都被拒，读数彻底进不来。
+  # 当前窗口边界，一律当「没有基准」处理。
+  # 活体实撞：state 里存着一个 14.5 小时之后的 reset，把面板的真值判成了「更旧的窗口」，
+  # 新 poller 每一帧都被拒，读数彻底进不来。
   # ⚠️ 基准 reset 无效 = 上次确认的读数属于**已结束的窗口**，那么它的百分比也一并作废，
-  # 不能只作废 reset 留着百分比去做单调性比较。2026-08-12 12:19 实撞：accountA 12:10 重置后
-  # state 顶层还留着旧窗口的 five=100，新窗口真值 20% 被「100→20 回退」拒掉，读数饿死。
+  # 不能只作废 reset 留着百分比去做单调性比较。实撞：某账号重置后 state 顶层还留着旧窗口的
+  # five=100，新窗口真值 20% 被「100→20 回退」拒掉，读数饿死。
   if [[ "$last_sr" =~ ^[0-9]+$ ]] \
      && { (( last_sr <= now )) || (( last_sr - now > QUOTA_SESSION_WINDOW_HORIZON )); }; then
     last_sr=""
@@ -357,15 +413,22 @@ quota_frame_stale() {
     last_week=""
   fi
 
+  # (2) The five-hour window is older than the last confirmed one -> an old-window frame.
+  #     Within five minutes it counts as same-window display/cache jitter: do not reject a
+  #     fresh high value whose reset is slightly earlier, and do not accept a cached low
+  #     value whose reset is slightly later as if it were a new window.
   # (2) 五小时窗口比上次确认的更旧 -> 旧窗口帧。5 分钟内属于同窗展示/缓存抖动，
   #     不能把稍早 reset 的新鲜高值拒掉，也不能把稍晚 reset 的缓存低值当成新窗口。
   if quota_reset_later_window "$last_sr" "$s_reset"; then
     return 0
   fi
+  # (3) Usage going backwards inside one window -> physically impossible.
   # (3) 同一窗口内用量回退 -> 物理上不可能
   if [[ "$last_five" =~ ^[0-9]+$ && "$five" =~ ^[0-9]+$ ]] && (( five < last_five )); then
     quota_reset_later_window "$s_reset" "$last_sr" || return 0
   fi
+  # (4)(5) Same for the weekly window (its reset text carries a date, so it cannot wrap
+  #        across midnight).
   # (4)(5) 周窗口同理（周 reset 文案自带日期，不会跨日回卷）
   if quota_reset_later_window "$last_wr" "$w_reset"; then
     return 0
@@ -376,16 +439,32 @@ quota_frame_stale() {
   return 1
 }
 
+# quota_monitor_dismiss — press Esc repeatedly until the composer comes back.
+# ⚠️ A single Esc is unreliable: after the `/usage` panel opens it keeps rendering (a
+# "Scanning local sessions..." line hangs at the bottom), while fetchedAtMs advances the
+# moment the API returns -- earlier than the panel finishes drawing. An Esc sent in that
+# gap is swallowed and the panel stays on screen. **The next round's `/usage` keystrokes
+# then land IN the panel and act as navigation keys**, so no new data can ever be pulled
+# again and it looks like "the monitor session hung". (Hit on the first live run: one
+# successful round, then two consecutive timeouts.)
+# So this does not guess at timing, it only accepts results: send one, verify one, at most
+# four times.
+# Look before acting: if the panel is already open, close it first rather than typing
+# commands into it.
+# The test uses two **mutually independent** conditions: the panel marker disappears AND
+# the composer appears. The composer alone is not enough -- when the panel is scrolled to
+# its lower half the marker text may be off-screen, so "I cannot see the panel" would
+# wrongly read as "the panel is closed".
 # quota_monitor_dismiss — 反复 Esc 直到 composer 回来
 # ⚠️ 单发一次 Esc 不可靠：`/usage` 的面板打开后还会继续渲染（底部挂「Scanning local
 # sessions…」），而 fetchedAtMs 在 API 返回的那一刻就前进了——早于面板渲染完。此时发的
 # Esc 会被吞掉，面板留在屏上。**下一轮的 `/usage` 几个字就会打进面板当导航键用**，
-# 于是再也拉不到新数据，看起来像"监控会话卡死"。（2026-08-11 首次上线活体撞出：
+# 于是再也拉不到新数据，看起来像「监控会话卡死」。（首次上线活体撞出：
 # 第一轮成功之后连续两轮超时。）
 # 所以这里不猜时序，只认结果：发一次验一次，最多 4 次。
 # 进场先看现场：面板开着就先关掉再走流程，别把命令打进面板里。
 # 判据用两条**互相独立**的：面板标志消失 + composer 出现。只看 composer 不够——
-# 面板滚动到下半屏时底部可能没有面板标志文字，光凭"没看见面板"会误判成已关闭。
+# 面板滚动到下半屏时底部可能没有面板标志文字，光凭「没看见面板」会误判成已关闭。
 quota_monitor_dismiss() {
   local i
   for i in 1 2 3 4 5; do
@@ -398,8 +477,11 @@ quota_monitor_dismiss() {
   ! quota_monitor_panel_open && quota_monitor_ready
 }
 
+# quota_panel_parse — extract "session_pct<TAB>week_pct<TAB>session_reset<TAB>week_reset"
+# from the panel text. Only the "Current session" and "Current week (all models)" sections
+# are recognised; the per-model section is deliberately skipped.
 # quota_panel_parse — 从面板文本抽 "session_pct<TAB>week_pct<TAB>session_reset<TAB>week_reset"
-# 只认 "Current session" 与 "Current week (all models)" 两段，Fable 那段明确跳过。
+# 只认 "Current session" 与 "Current week (all models)" 两段，按模型分档那段明确跳过。
 quota_panel_parse() {
   printf '%s\n' "$1" | awk '
     function pct(s){ if (match(s,/[0-9]+% used/)) { p=substr(s,RSTART,RLENGTH); sub(/% used/,"",p); return p } return "" }
@@ -419,6 +501,10 @@ quota_panel_parse() {
     }'
 }
 
+# quota_panel_field — take a field out of the TAB protocol while PRESERVING empty columns.
+# Bash's `IFS=$'\t' read` collapses consecutive TABs as whitespace, so when a 0% window has
+# no Resets line the week reset shifts into the five reset's position. `cut` keeps
+# consecutive separators distinct, which is the whole reason it is used here.
 # quota_panel_field — 从 TAB 协议取字段且保留空列。
 # Bash 的 `IFS=$'\t' read` 会把连续 TAB 当 whitespace 折叠；0% 窗口没有 Resets 行时，
 # week reset 会因此错位成 five reset。cut 的字段语义会保留连续分隔符。
@@ -442,12 +528,24 @@ quota_panel_frame_status() {
   if grep -qiE 'last[ -]?known usage|showing (cached|previous) usage' <<<"$frame"; then
     printf 'last_known\n'; return 0
   fi
+  # ⚠️ Recognise these error strings ONLY inside the region the quota block belongs to.
+  # The lower half of the `/usage` page does usage attribution -- it scans local session
+  # files to work out which sessions consumed what -- and when that scan cannot complete it
+  # prints `Could not refresh usage data`. That sentence belongs to the ATTRIBUTION block
+  # and **says nothing about the quota numbers above it**, which are usually fine. The old
+  # test ignored position and failed the whole frame whenever the string appeared anywhere
+  # on screen.
+  # Measured: six false rejections in one day, each throwing away a good frame and backing
+  # off a tier; one stretch of 19 minutes with no reading at all, rescued only by the
+  # banner path, traced back to exactly this.
+  # The fix: treat `What's contributing to your limits usage?` as a boundary and ignore
+  # error text that appears after it.
   # ⚠️ 只在**额度块所属区域**内认这些错误文案。
   # `/usage` 页下半部分的「用量归因分析」要扫描本机会话文件来算「哪些会话吃了多少」，
   # 它扫不动时会打 `Could not refresh usage data` —— 那句属于归因块，**与上面的额度数值
   # 无关**，额度部分往往是好的。旧判据不看位置，整屏出现就判整帧失败。
-  # 2026-08-20 实测误伤 6 次（12:21×3、12:37、12:51、12:54），每次丢一帧好数据并退一档；
-  # 12:15-12:21 连着 19 分钟拿不到读数、最后靠横幅救场，根子就在这。
+  # 实测一天内误伤 6 次，每次丢一帧好数据并退一档；其中连着 19 分钟拿不到读数、
+  # 最后靠横幅救场，根子就在这。
   # 做法：以 `What's contributing to your limits usage?` 为界，界之后的错误文案不作数。
   local _above
   _above=$(printf '%s\n' "$frame" | sed -n "1,/What's contributing to your limits usage/p")
@@ -464,7 +562,12 @@ quota_panel_frame_status() {
     fi
     return 0
   fi
-  # 常驻后 cc 会继续渲染本机 usage 归因，额度区块可能被滚出当前 viewport；顶部 tab chrome
+  # Once it settles, the client keeps rendering local usage attribution and the quota block
+  # can scroll out of the viewport. If the top tab chrome is still there and there is no
+  # composer, the panel has NOT closed. Mark this panel_detail (worth keeping in the raw
+  # log, but carrying no decidable numbers) so that quota_monitor_observe does not read it
+  # as closed and bypass next_due to open another network request early.
+  # 常驻后客户端会继续渲染本机 usage 归因，额度区块可能被滚出当前 viewport；顶部 tab chrome
   # 仍在且没有 composer，说明面板没有关闭。这里仅标为 panel_detail（可留原始日志但无数值
   # 可决策），避免 quota_monitor_observe 把它当 closed 而绕过 next_due 提前重开一次网络请求。
   if grep -qE \
@@ -476,6 +579,8 @@ quota_panel_frame_status() {
   printf 'closed\n'
 }
 
+# The network `/usage` tiering looks only at the larger used% of the current account's two
+# windows -- equivalently, the smaller remaining%.
 # 网络 `/usage` 分档只看当前账号两个窗口里更大的 used%，即更小的 remaining%。
 quota_usage_interval_for_values() {
   local five="${1:-}" week="${2:-}" worst remaining
@@ -631,6 +736,8 @@ quota_panel_reset_epoch() {
     epoch=$(quota_tz_date "$tz" -d "$(quota_tz_date "$tz" +%Y-%m-%d) $timepart" +%s 2>/dev/null) || return 1
     now=$(date +%s)
     (( epoch <= now )) && epoch=$(( epoch + 86400 ))
+    # Wrapped too far -> this text actually points into the past. Restore it to that past
+    # epoch so the caller can SEE that the window has expired.
     # 回卷过头 → 这行文案其实指向过去；还原成过去的那个 epoch，让调用方看得出窗口已过期
     if [[ "$horizon" =~ ^[0-9]+$ ]] && (( epoch - now > horizon )); then
       epoch=$(( epoch - 86400 ))
@@ -640,6 +747,12 @@ quota_panel_reset_epoch() {
   printf '%s\n' "$epoch"
 }
 
+# quota_reset_validate_for_write — the ONE legality gate a reset passes before entering the
+# decision ledger.
+# Read-time validation is still kept, to catch historical bad values and manual edits; but
+# a new sample must prove BEFORE the write that its reset is a future boundary of the
+# current window. If either axis is illegal the caller must reject the whole frame -- never
+# write null, and never pair a new percentage with an old reset.
 # quota_reset_validate_for_write — reset 进入决策台账前的唯一合法性闸。
 # 读时校验仍保留，用来挡历史坏值/人工修改；新采样则必须在写入前证明 reset 是当前窗口
 # 的未来边界。任一维非法时调用方应整帧拒绝，不能写 null 或让新百分比搭配旧 reset。
@@ -674,6 +787,8 @@ quota_monitor_panel_open() {
   [[ "$status" != "closed" ]]
 }
 
+# quota_monitor_prepare_owner — one place handling monitor liveness, account ownership and
+# tmux generation.
 # quota_monitor_prepare_owner — 统一处理 monitor 生存、账号归属与 tmux 代际。
 quota_monitor_prepare_owner() {
   quota_account_guard "panel-before" || return 1
@@ -693,6 +808,8 @@ quota_monitor_prepare_owner() {
     quota_log "monitor tmux is alive but the CLI fell back to a shell -> relaunching in the same pane and rebinding"
     quota_monitor_restart "$cur_acct" "$cur_uuid" || return 1
   elif ! quota_monitor_panel_open && ! quota_monitor_ready; then
+    # It may be mid-start from the previous round. Give it one normal ready budget; on
+    # timeout, fail closed rather than stacking another command on top.
     # 可能恰逢上一轮启动中；给它一次正常 ready 预算，超时后 fail closed，不叠加命令。
     quota_monitor_wait_ready || return 1
   fi
@@ -749,6 +866,8 @@ quota_monitor_open_usage() {
   fi
 }
 
+# Purely local observation: capture / classify / parse / log only. It never sends a
+# keystroke and never feeds a quota decision.
 # 纯本地观察：只 capture/classify/parse/log，绝不按键、绝不进入额度决策。
 quota_monitor_observe() {
   local mode="${1:-local_sample}" frame status now seq penalized
@@ -779,7 +898,13 @@ quota_monitor_observe() {
   return 0
 }
 
-# stale 帧已经经过本轮多帧稳定采样；此时允许用一代全新 cc 作一次仲裁。先把冷却账
+# A stale frame has already survived this round's multi-frame stability sampling, so a
+# brand-new client generation is allowed to arbitrate once. Persist the cooldown record
+# BEFORE exiting the old process, so that a crash in between still cannot turn this into a
+# restart or a re-request every 10 seconds. A second stale after the restart enters with
+# mode=stale_recovery and never recurses; a manual monitor-restart is not subject to this
+# cooldown.
+# stale 帧已经经过本轮多帧稳定采样；此时允许用一代全新客户端作一次仲裁。先把冷却账
 # 持久化再退出旧进程，保证中途崩溃也不会每 10 秒重启/重发请求。重启后的第二次 stale
 # 以 mode=stale_recovery 进入，绝不递归；人工 monitor-restart 不受本冷却限制。
 quota_monitor_stale_recovery_claim() {
@@ -850,6 +975,8 @@ quota_monitor_refresh() {
       }
       ;;
     refreshing)
+      # If the previous request is still in flight, do not stack a second one on top --
+      # and do not re-consume its old percentage either.
       # 观察到前一请求仍在飞时不叠加第二个请求，也不重复消费它的旧百分比。
       QUOTA_LAST_ERROR="panel:already-refreshing"
       now=$(date +%s)
@@ -878,6 +1005,8 @@ quota_monitor_refresh() {
       ;;
   esac
 
+  # After the network action, inspect the whole visible screen once per second. A polluted
+  # state takes precedence over whatever percentage is still left on it.
   # 网络动作后逐秒看整张可见屏。污染状态优先于其中残留的百分比。
   for i in $(seq 1 "$QUOTA_PANEL_SAMPLE_SEC"); do
     sleep 1
@@ -933,8 +1062,11 @@ quota_monitor_refresh() {
   g_sl=$(quota_panel_field "$got" 3); g_wl=$(quota_panel_field "$got" 4)
   g_sr=$(quota_panel_reset_epoch "$g_sl" "$QUOTA_SESSION_WINDOW_HORIZON" 2>/dev/null || echo "")
   g_wr=$(quota_panel_reset_epoch "$g_wl" "$QUOTA_WEEK_WINDOW_HORIZON" 2>/dev/null || echo "")
+  # Close the sampling-period identity bracket BEFORE the stale test (which may trigger a
+  # monitor generation change). If the account has drifted, just drop the frame -- do not
+  # exit or relaunch any client.
   # 在 stale 判断（它可能触发一次 monitor 换代）之前先闭合采样期身份 bracket；账号若
-  # 已漂移，只丢帧，不退出/重拉任何 cc。
+  # 已漂移，只丢帧，不退出/重拉任何客户端。
   quota_monitor_owner_guard "panel-after" || {
     quota_usage_refresh_failure "$(date +%s)" "owner_guard_after_panel" 0 || true
     return 1
@@ -953,7 +1085,14 @@ quota_monitor_refresh() {
   return 0
 }
 
-# quota_monitor_restart — 保留 tmux 容器，只在原 pane 内退出并重启 cc；如果 cc 已经
+# quota_monitor_restart — keep the tmux container; exit and restart the client inside the
+# SAME pane. If the client has already dropped back to a shell, skip `/exit` and relaunch
+# directly.
+# With `expected` omitted this serves the manual CLI: the account guard supplies the
+# currently controlled identity first. restart performs the owner binding itself and the
+# caller must NOT bind again -- otherwise, with the tmux generation unchanged, a manual
+# restart would be followed by the poller restarting it a second time.
+# quota_monitor_restart — 保留 tmux 容器，只在原 pane 内退出并重启客户端；如果客户端已经
 # 退回 shell，则跳过 `/exit` 直接重拉。
 # expected 省略时用于人工 CLI：先由账号守卫取得当前受控身份。restart 自己完成 owner 绑定，
 # 调用方不得再 bind；这样 tmux 代际不变时也不会出现人工重启后 poller 再重启一次。

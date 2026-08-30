@@ -55,6 +55,8 @@ trap 'rm -rf "$TMP"' EXIT
 WANT=("$@")
 
 OK=0; BAD=0
+# For these ablations the correct behaviour is to ABORT, so they additionally require zero
+# PASS/FAIL counter lines in the output.
 # 这些消融的正确表现是「中止」，额外要求输出里零 PASS/FAIL 计数行。
 MUST_ABORT="tmp-mktemp-failure tmp-value-unusable"
 declare -a ROWS=()
@@ -85,6 +87,11 @@ ablate() {
   #    而本文件开着 pipefail ⇒ 这些消融要证明的那个机制，恰好会污染它自己的裁决：
   #    真红的消融被记成 MISS。同一形状实测漏判 0–7.8%（随负载），命中越靠前越容易漏。
   if grep -Fq -- "$expect" <<<"$out"; then hit=1; fi
+  # ⚠️ For some ablations the correct behaviour is to ABORT, not "one assertion goes red".
+  #    For those, an exit code plus a keyword is not enough -- before the hardening the
+  #    exit code was already non-zero, so an expectation written only as "exit code is
+  #    non-zero" passes either way. The extra requirement: **not one PASS/FAIL may be
+  #    produced**.
   # ⚠️ 有些消融的正确表现是「中止」而不是「某条断言变红」。对这些，光有退出码和关键字还不够
   #    ——未加固时退出码本来就是非 0。额外要求：**一条 PASS/FAIL 都不许产生**。
   case " $MUST_ABORT " in
@@ -196,6 +203,8 @@ ablate p1-menu-wording \
     "USAGE_MENU_OPT2_REGEX='2\\.[[:space:]]+Switch to usage credits'" \
     "USAGE_MENU_OPT2_REGEX='2\\.[[:space:]]+'"
 
+# Make the legacy banner test unable to match a user message => the self-trigger incident
+# can no longer be reproduced.
 # 让旧横幅判据抓不到用户消息 ⇒ 自激事故复现不出来
 ablate p3-banner-selftrigger \
   "P3 横幅自激事故：对照组必须被用户消息触发" --fast \
@@ -204,6 +213,8 @@ ablate p3-banner-selftrigger \
     'USAGE_BANNER_REGEX="You.{0,3}ve hit your [A-Za-z0-9 -]*limit"' \
     'USAGE_BANNER_REGEX="__never_matches_anything__"'
 
+# Give the legacy parser a time zone it CAN resolve => the 8-hour offset can no longer be
+# reproduced.
 # 给旧解析器一个能解析的时区 ⇒ 8 小时偏差复现不出来
 ablate p5-timezone-offset \
   "P5 缺时区 8 小时偏差：对照组必须复现它" --fast \

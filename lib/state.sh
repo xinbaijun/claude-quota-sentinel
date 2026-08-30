@@ -69,6 +69,7 @@ quota_fmt_delta() {
   if [[ "$sec" == -* ]]; then printf '%s ago' "$out"; else printf 'in %s' "$out"; fi
 }
 
+# ISO8601 -> epoch. The server sends UTC, shaped like 2026-08-21T07:30:00+00:00.
 # ISO8601（服务端给的是 UTC，形如 2026-08-21T07:30:00+00:00）→ epoch
 quota_iso_to_epoch() {
   local iso="${1:-}"
@@ -83,6 +84,10 @@ quota_state_merge() {
   [[ -z "$cur" ]] && cur='{}'
   mkdir -p "$(dirname "$QUOTA_STATE")" 2>/dev/null
   tmp=$(mktemp "${QUOTA_STATE}.XXXXXX") || return 1
+  # ⚠️ Try it with the human-readable timestamps first; on failure fall back to doing
+  #    **only the merge that was actually asked for**. Rendered times are a convenience
+  #    for people reading the file; a state write must never fail because of one -- that
+  #    would stop the whole tool.
   # ⚠️ 先带格式化跑；失败就退回**只做本来那次合并**。
   #    可读时间是给人看的附加品，绝不能因为它让状态写入失败——那会让整套停摆。
   if printf '%s' "$cur" | jq -c --argjson tzoff "$QUOTA_TZ_OFFSET_SEC" --arg tzlabel "$QUOTA_TZ_LABEL" \
@@ -111,6 +116,9 @@ quota_usage_interval_current() {
   quota_usage_interval_for_values "$five" "$week"
 }
 
+# quota_estimate_values <now> — echoes "estimated_five estimated_week"; returns 1 when
+# no estimate can be made. It runs alongside the real values and only has any effect in
+# the gap between two real readings.
 # quota_estimate_values <now> — echo "预估five 预估week"；无法预估时返回 1。
 # 与真实值并行，只在两次真实读数之间起作用。
 quota_estimate_values() {
@@ -120,11 +128,15 @@ quota_estimate_values() {
   base_five=$(quota_state_get '.five_hour' ""); [[ "$base_five" =~ ^[0-9]+$ ]] || return 1
   base_week=$(quota_state_get '.seven_day' ""); [[ "$base_week" =~ ^[0-9]+$ ]] || return 1
   base_ts=$(quota_state_get '.fetched_ts' "");  [[ "$base_ts"  =~ ^[0-9]+$ ]] || return 1
+  # No extrapolation between a switch and the first real reading after it: the rate
+  # measured at that moment belongs to the PREVIOUS account.
   # 切号之后、真实读数之前不外推：那一刻的速度属于上一个账号。
   sw=$(quota_state_get '.last_switch_ts' 0); [[ "$sw" =~ ^[0-9]+$ ]] || sw=0
   (( sw > base_ts )) && return 1
   lead=$(( now - base_ts ))
   (( lead <= 0 )) && { printf '%s %s\n' "$base_five" "$base_week"; return 0; }
+  # Past the cap, stop extrapolating: that far out means the query itself is broken,
+  # which is a different problem and not one extrapolation should paper over.
   # 超过上限就不再外推：那说明查询本身出了故障，是另一个问题，不该靠外推硬撑。
   [[ "$QUOTA_ESTIMATE_MAX_LEAD" =~ ^[0-9]+$ ]] || return 1
   (( lead > QUOTA_ESTIMATE_MAX_LEAD )) && return 1
@@ -134,6 +146,7 @@ quota_estimate_values() {
     'BEGIN{printf "%d %d\n", bf + rf*l, bw + rw*l}'
 }
 
+# quota_estimate_exceeds <now> — has the estimate crossed the switch line yet?
 # quota_estimate_exceeds <now> — 预估值是否已越过切换线
 quota_estimate_exceeds() {
   local now="$1" vals ef ew
@@ -225,6 +238,9 @@ quota_usage_refresh_begin() {
   QUOTA_REFRESH_INTERVAL=$effective
 }
 
+# penalize=1 is only for responses that are definitely not trustworthy (429, last-known,
+# refresh-failed). An ordinary UI or parse failure already had its next_due pushed out to
+# the current tier at begin time, so it cannot degrade into hitting the network every 10s.
 # penalize=1 只用于 429/last-known/refresh-failed 等明确不可信响应；普通 UI/解析故障
 # 已在 begin 时把 next_due 推到当前档位，不会退化成每 10s 重打网络。
 quota_usage_refresh_failure() {
@@ -254,6 +270,11 @@ quota_usage_refresh_failure() {
     --argjson penalize "$([[ "$penalize" == "1" ]] && echo true || echo false)"
 }
 
+# quota_panel_observations_prune_if_due — the caller already holds the observations lock.
+# Only well-formed JSON objects whose observed_at is unambiguously older than the cutoff
+# are dropped. Corrupt lines, lines with no timestamp, and frames right on the boundary
+# are all KEPT: otherwise one damaged line escalates into losing the whole evidence file.
+# The output goes to a temporary file in the same directory and is then atomically renamed.
 # quota_panel_observations_prune_if_due — 调用方已持有 observations lock。
 # 只删除 observed_at 明确早于 cutoff 的合法 JSON object；坏行、缺时间行与边界帧都保留，
 # 防止单行损坏扩大成整份证据丢失。输出先写同目录临时文件，再 atomic rename。
@@ -274,6 +295,8 @@ quota_panel_observations_prune_if_due() {
   fi
 
   cutoff=$(( now - QUOTA_PANEL_RETENTION_SEC ))
+  # Record the attempt BEFORE scanning the large file. Then a transient disk or jq
+  # failure cannot degrade this into rescanning every 10 seconds.
   # 先记 attempt，再做大文件扫描；即使磁盘/jq 临时失败，也不会退化成每 10 秒重扫。
   quota_shadow_atomic_write "$stamp" "$now" || return 1
   tmp=$(mktemp "${QUOTA_PANEL_OBSERVATIONS}.prune.XXXXXX") || return 1
@@ -305,6 +328,8 @@ quota_panel_observations_prune_if_due() {
   return 0
 }
 
+# One line per screen sample. This file is raw evidence for investigating afterwards;
+# nothing here feeds a quota decision.
 # 每次画面采样都写一条；这份是调查原始证据，不参与额度决策。
 quota_panel_log_observation() (
   local observed="$1" email="$2" uuid="$3" mode="$4" status="$5" frame="$6"
@@ -343,12 +368,28 @@ quota_panel_log_observation() (
   printf '%s\n' "$event" >> "$QUOTA_PANEL_OBSERVATIONS"
 )
 
+# quota_account_guard — a persistent identity fence over a SHARED config file.
+#
+# A switching tool can only prove the file was correct **at the instant it read it back**.
+# Any long-running client process on the same machine holds its own in-memory copy of that
+# config and does not participate in the tool's lock, so it can atomically write the old
+# snapshot back a microsecond later. No amount of sleep-and-re-read closes that window --
+# it only makes it smaller. So the email + UUID confirmed by the last controlled switch is
+# PERSISTED, and re-read at every point where identity matters: the start of a poll, and
+# either side of reading the panel. Any drift goes to account_drift; a new value is never
+# silently adopted. The second argument demands that the current account be one specific
+# account right now (used by the all-exhausted waiting path).
+#
+# ⚠️ 抽取说明 / extraction note: the baseline also re-read this fence around two call
+#    sites that did not come across (clearing client dialogs, and delivering
+#    work-resumption messages). The fence itself is unchanged; it simply has fewer
+#    callers here. Nothing about its guarantee depends on how many places call it.
 # quota_account_guard — 共享配置的持续身份 fence。
 #
-# 切号工具只能证明「它回读的那一刻」写对了；宿主上的长跑 Claude 进程不参加工具锁，
+# 切号工具只能证明「它回读的那一刻」写对了；同一台机器上长跑的客户端进程不参加工具锁，
 # 可以在下一微秒拿旧内存快照原子覆盖回来。有限次数 sleep+回读永远关不掉这个时间窗，
-# 所以这里把最后一次受控切号确认的 email+UUID 持久化，并在：轮询开头、面板前后、
-# 清框前后、复工投递前全部重读。任何漂移都进入 account_drift，绝不把新值静默收编。
+# 所以这里把最后一次受控切号确认的 email+UUID 持久化，并在轮询开头、面板前后重读。
+# 任何漂移都进入 account_drift，绝不把新值静默收编。
 # 第二个参数可要求此刻必须就是某个目标账号（全耗尽等待路径使用）。
 quota_account_guard() {
   local context="${1:-unspecified}" required_email="${2:-}"
@@ -380,10 +421,16 @@ quota_account_guard() {
   elif [[ -n "$required_email" && "$actual_email" != "$required_email" ]]; then
     reason="target-mismatch"
   elif [[ -z "$expected_email" && -n "$state_account" && "$actual_email" != "$state_account" ]]; then
-    # 首次升级也不能盲采“此刻文件”为基线：state.account 是上一轮已归属的面板账号；
+    # Even on the first upgrade, do not blindly take "whatever the file says right now"
+    # as the baseline. state.account is the panel account attributed on the previous
+    # round; the two differing with no controlled switch having written expected is
+    # exactly the signature of a silent revert with no success event behind it.
+    # 首次升级也不能盲采「此刻文件」为基线：state.account 是上一轮已归属的面板账号；
     # 两者不同且没有受控切号写 expected，正是无成功事件的静默回退签名。
     reason="account-drift"
   elif [[ -z "$expected_email" ]]; then
+    # When upgrading pre-existing state, establish the baseline ONCE. Seeing a different
+    # account later never re-baselines by itself.
     # 升级存量状态时只建立一次基线；之后再看到别的账号绝不自动改基线。
     if ! QS_JQ_E="$actual_email" quota_state_merge '
         .account_guard.expected_email = $ENV.QS_JQ_E
@@ -409,6 +456,9 @@ quota_account_guard() {
   elif [[ "$actual_email" != "$expected_email" || "$oauth_uuid" != "$expected_uuid" ]]; then
     reason="account-drift"
   else
+    # A caller attributing panel numbers to an account must consume THIS guard's snapshot
+    # directly. Reading the file again after the guard passes re-opens the TOCTOU window
+    # for any overwrite that lands between the two reads.
     # 调用方若要把面板数值归属到账号，必须直接消费这一次 guard 的同一快照；
     # guard 通过后再读一次文件会重新打开覆盖落在两次读取之间的 TOCTOU。
     QUOTA_GUARD_EMAIL="$actual_email"
@@ -440,6 +490,10 @@ quota_account_guard() {
   if (( should_log )); then
     quota_log "❌ account identity guard blocked ($reason, context=$context): expected [${expected_email:-not-established}], actual [${actual_email:-unreadable}] -> fail closed, not following"
   fi
+  # ⚠️ A switch made outside this tool still belongs in the ledger, but the drift
+  #    reproduces on every single beat, so it must not be logged on every beat. Record
+  #    only when the current actual account differs from the last one recorded -- one
+  #    line per switch, not one line per poll.
   # ⚠️ 外部切号也要进流水账，但漂移每一拍都会复现，不能每拍记一条。
   #    只在「当前实际账号」与上次记过的不同时记 —— 一次切号只留一条。
   if [[ -n "$actual_email" ]]; then
@@ -454,7 +508,13 @@ quota_account_guard() {
   return 1
 }
 
-# quota_monitor_owner_guard — 面板归属还要与“监控会话启动时的账号”一致。
+# quota_monitor_owner_guard — panel attribution must ALSO match the account the monitor
+# session was started under.
+# Bracketing the shared file A -> A is not enough to stop an ABA: the file can briefly
+# become B in between, the monitor restarts under B, and the file is back to A before the
+# panel read finishes. The persistent expected value passes, yet numbers produced by a
+# B-monitor must not be recorded against A.
+# quota_monitor_owner_guard — 面板归属还要与「监控会话启动时的账号」一致。
 # 只做共享文件的 A→A bracket 仍挡不住 ABA：文件可在中间短暂变 B，monitor 按 B 重启，
 # 面板读完前又回 A。此时 persistent expected 会通过，但 B-monitor 的数不能记给 A。
 quota_monitor_owner_guard() {
@@ -493,8 +553,12 @@ quota_monitor_owner_guard() {
   return 0
 }
 
-# 新建/重启 monitor 后，把账号身份与 tmux session generation、cc launch id 一起登记。
-# 只记录 email/UUID 会让同名 tmux 或原 pane 内的旧 cc 冒用新一代 owner 证明。
+# After creating or restarting the monitor, register the account identity TOGETHER WITH
+# the tmux session generation and the client launch id.
+# Recording only email/UUID would let a same-named tmux session, or an older client still
+# living in the original pane, pass itself off as the new generation's owner.
+# 新建/重启 monitor 后，把账号身份与 tmux session generation、客户端 launch id 一起登记。
+# 只记录 email/UUID 会让同名 tmux 或原 pane 内的旧客户端冒用新一代 owner 证明。
 quota_monitor_bind_owner() {
   local context="$1" expected_email="$2" expected_uuid="$3" expected_launch="${4:-}"
   local launch_email="${5:-}" launch_uuid="${6:-}" live_gen live_launch
@@ -573,6 +637,14 @@ quota_ratio_update() {
   snap=$(quota_state_read 2>/dev/null || echo '{}')
   IFS=$'\t' read -r l_acct l_five l_week < <(printf '%s' "$snap" \
     | jq -r '(.ratio.last // {}) | "\(.acct // "")\t\(.five // -1)\t\(.week // -1)"' 2>/dev/null)
+  # Accumulate only when the account is unchanged AND neither percentage went backwards:
+  #   account changed  -> the two curves are not comparable at all
+  #   five went down   -> the 5-hour window just reset; the drop is not consumption
+  #   week went down   -> either the weekly window reset, or a reading from a DIFFERENT
+  #                       account slipped in (which has actually happened)
+  # ⭐ 这一条防的是「跨主体比较同名指标」：数值本身不会告诉你它换了主体。
+  #    Comparing a same-named metric across subjects is the failure this guards: the
+  #    number itself never tells you the subject changed.
   # 只在同一账号、且两个百分比都没回退时才累计：
   #   账号变了 → 两条曲线不可比
   #   five 回退 → 五小时窗口刚重置，落差不是消耗
@@ -589,6 +661,8 @@ quota_ratio_update() {
     --argjson af "$add_f" --argjson aw "$add_w" --argjson t "$now"
 }
 
+# quota_ratio_value — echoes "<ratio> <source>"; falls back to the seed value while
+# there are not yet enough samples.
 # quota_ratio_value — echo "<比值> <来源>"；样本不够就用种子值
 quota_ratio_value() {
   local ft wt
@@ -613,6 +687,10 @@ quota_capacity_update() {
   [[ "$known" =~ ^[0-9]+$ ]] || return 0
   (( known == 0 )) && return 0
 
+  # Sampling: one row per INTERVAL. `known` is recorded alongside, and the slope is taken
+  # only across samples with the SAME `known` -- the first time a new account is measured
+  # the total jumps a long way (unknown -> 52%), and that jump is information arriving,
+  # not consumption happening.
   # 采样：每 INTERVAL 记一条。同时记下 known，取斜率时只用 known 相同的样本——
   # 第一次量到某个新账号会让总和跳一大截（未知→52%），那不是消耗，是信息补全。
   local last_ts
@@ -624,6 +702,7 @@ quota_capacity_update() {
     snap=$(quota_state_read 2>/dev/null || echo '{}')
   fi
 
+  # Slope: first and last of the run of samples that share the same `known`.
   # 斜率：取 known 相同的那批样本的首尾
   local span delta rate="" runway=""
   line=$(printf '%s' "$snap" | jq -r --argjson k "$known" '
@@ -638,6 +717,7 @@ quota_capacity_update() {
     runway=$(awk -v r="$week_remaining" -v d="$delta" -v s="$span" 'BEGIN{printf "%.1f", r*s/(d*3600)}')
   fi
 
+  # Weekly reset horizon: the earliest one across all accounts.
   # 周重置地平线：取各账号里最早的一个
   local reset_in=""
   local wr; wr=$(printf '%s' "$snap" | jq -r --argjson n "$now" '
@@ -646,6 +726,9 @@ quota_capacity_update() {
 
   local ratio_line ratio_val ratio_src cycles="" m_ratio="" m_five=0 m_week=0
   ratio_line=$(quota_ratio_value); ratio_val=${ratio_line%% *}; ratio_src=${ratio_line#* }
+  # The running measured value: computed and displayed whether or not it has crossed the
+  # threshold to replace the seed, so a reader can watch it converge and can tell at a
+  # glance whether the value in use right now is measured or guessed.
   # 累计实测值：不管够不够替换种子值的门槛都算出来并展示，好让人看着它收敛，
   # 也能一眼判断当前在用的到底是量出来的还是猜的。
   IFS=$'\t' read -r m_five m_week < <(quota_state_read 2>/dev/null \

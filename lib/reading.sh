@@ -14,6 +14,10 @@
 # 一、额度读数层（唯一真相源：cc 自己写的 cachedUsageUtilization）
 # ════════════════════════════════════════════════════════════════════════
 
+# Read the snapshot and check its freshness. Returns JSON; non-zero when unusable.
+# ⚠️ A stale snapshot is MORE dangerous than no snapshot: it makes a half-hour-old number
+#    look current, and switching on it walks straight into the wall. So this returns
+#    "nothing available" rather than hand out expired data.
 # 读快照并做新鲜度校验。返回 JSON；不可用时返回非零。
 # ⚠️ 陈旧的快照比没有快照更危险——会拿半小时前的额度当现在的，切过去立刻撞墙。
 #    所以这里宁可判定「没有」，也不把过期数据交出去。
@@ -27,15 +31,35 @@ quota_snapshot_read() {
   cat "$QUOTA_SNAPSHOT_FILE"
 }
 
+# ── One entry point for ledger writes: several upstreams, arbitrated by observation time
+#
+# The ledger has two upstreams: the client's /usage panel and the OAuth endpoint.
+# The question "which one is authoritative" was dissolved by the architecture rather than
+# answered -- **whichever observation is newer wins**. That came out of measurement:
+#
+#   As it nears the threshold the panel tightens to one read every 60s, and **asking more
+#   often is exactly what gets you rate-limited**. Over ten days of logs the panel went
+#   blind 27 times; 22 of those (81%) fell in the danger zone with five>=85%, median
+#   blindness 6.4 minutes, longest 54 minutes. The worst one went from 91% straight to
+#   100% without a single reading in between -- the entire danger zone, unobserved.
+#   The OAuth line is fixed at 180s and does not tighten with the level, so it does not
+#   walk into that trap.
+#   => The two upstreams do not fail at the same times. In parallel beats in series:
+#      during those six blind minutes the OAuth line is still writing.
+#
+# ⚠️ Priority is NOT by source, only by observation time. The two were measured to have no
+#    systematic bias between them (65 paired samples, signed mean +0.2 points, residuals
+#    growing only with the sampling gap) -- equally accurate, so there is no reason to let
+#    either override the other.
 # ── 台账写入统一入口：多上游共写，按观测时刻新旧定胜负 ────────────────────
 #
-# 2026-08-21 起台账有两个上游：/usage 面板与 OAuth 接口（将来还有对话横幅）。
-# 「谁当主」的问题被架构消掉了 —— **谁的观测更新，就用谁的**。依据是实测：
+# 台账有两个上游：/usage 面板与 OAuth 接口。「谁当主」的问题被架构消掉了 ——
+# **谁的观测更新，就用谁的**。依据是实测：
 #
 #   面板逼近阈值时会收紧到 60s 一次，而**问得越勤越容易被服务端限流**。翻 10 天日志：
 #   面板因限流失明 27 次，其中 22 次（81%）发生在 five>=85% 的危险区，失明中位
-#   6.4 分钟、最长 54 分钟；最要命一次（08-17 18:28）从 91% 一路瞎到 100%，
-#   整个危险区间一眼没看见。OAuth 固定 180s、不随水位收紧，反而不踩这个坑。
+#   6.4 分钟、最长 54 分钟；最要命一次从 91% 一路瞎到 100%，整个危险区间一眼没看见。
+#   OAuth 固定 180s、不随水位收紧，反而不踩这个坑。
 #   ⇒ 两个上游的失败时机不重合，并联比串联强。面板瞎那 6 分钟里 OAuth 还在写。
 #
 # ⚠️ 不按来源定优先级，只按观测时刻。已实测两边无系统性偏差（65 对配对，有向均值
@@ -69,6 +93,9 @@ quota_reading_apply() {
   [[ "$five_reset" =~ ^[0-9]+$ ]] && fr="$five_reset"
   [[ "$week_reset" =~ ^[0-9]+$ ]] && wr="$week_reset"
 
+  # Only the CURRENT account touches the top-level decision fields. Top-level .five_hour
+  # means "how much the **current** account has left"; writing somebody else's number
+  # there switches accounts on the wrong level, directly.
   # 只有当前账号才动顶层决策字段。顶层 .five_hour 的语义是「**当前**账号还剩多少」，
   # 把别人的数写进去会直接按错误水位切号。
   local expr='.accounts[$ENV.QS_JQ_E] = ((.accounts[$ENV.QS_JQ_E] // {}) + {five:$f, week:$w, checked_ts:$o, source:$s})
@@ -99,12 +126,12 @@ quota_oauth_fallback_apply() {
       "$QUOTA_SHADOW_OAUTH_STATE" 2>/dev/null) || return 1
   [[ -n "$raw" ]] || return 1
   IFS=$'\t' read -r em obs five week <<< "$raw"
-  # ① 身份
+  # gate 1 — identity / ① 身份
   [[ -n "$expect" && "$em" == "$expect" ]] || {
     quota_log "⚠️ OAuth fallback unusable: sampled account [$em] != current [$expect] -> will not stand in"
     return 1
   }
-  # ② 新鲜度
+  # gate 2 — freshness / ② 新鲜度
   [[ "$obs" =~ ^[0-9]+$ ]] || return 1
   age=$(( now - obs ))
   (( age < 0 || age > QUOTA_OAUTH_FALLBACK_MAX_AGE )) && {
@@ -112,7 +139,7 @@ quota_oauth_fallback_apply() {
     return 1
   }
   [[ "$five" =~ ^[0-9]+$ && "$week" =~ ^[0-9]+$ ]] || return 1
-  # ③ 落盘并标明来源
+  # gate 3 — persist it, tagged with its source / ③ 落盘并标明来源
   QS_JQ_E="$em" quota_state_merge '
       .five_hour = $f | .seven_day = $w | .fetched_ts = $o
       | .accounts[$ENV.QS_JQ_E].five = $f | .accounts[$ENV.QS_JQ_E].week = $w
@@ -124,6 +151,21 @@ quota_oauth_fallback_apply() {
   return 0
 }
 
+# quota_reset_watch_pending — is any account "past its reset moment while the number in
+# hand is still from before it"?
+#
+# The test is **structural**; it guesses no threshold:
+#     snapshot taken at < that account's reset moment <= now
+# Read it as "this snapshot was taken before it reset, and that moment has now passed"
+# => what we hold must be stale. Once a re-query succeeds, the new snapshot's timestamp is
+# later than the reset moment, the condition stops holding by itself, and **the watch
+# stops on its own**.
+# Deliberately NOT "usage dropped below N": that needs a threshold, and an account can be
+# used down again immediately after resetting, so a threshold test would misread that as
+# "has not reset yet" and keep querying forever.
+#
+# Only non-current accounts are watched: the current one is already covered by the /usage
+# panel and by the 180s shadow sampler.
 # quota_reset_watch_pending — 有没有账号「刚过回血时刻但手上的数还是旧的」
 #
 # 判据是**结构性**的，不猜阈值：
@@ -147,6 +189,7 @@ quota_reset_watch_pending() {
         ] | length > 0' "$QUOTA_SNAPSHOT_FILE" >/dev/null 2>&1
 }
 
+# For the log: list the accounts currently being watched.
 # 供日志用：把在等的账号名列出来
 quota_reset_watch_list() {
   local now="$1"
@@ -160,6 +203,12 @@ quota_reset_watch_list() {
           | (.email | split("@")[0]) ] | join(" ")' "$QUOTA_SNAPSHOT_FILE" 2>/dev/null
 }
 
+# When due, generate a snapshot **in the background**.
+# ⚠️ Background is mandatory: the probe takes about 2 seconds per account, so three
+#    accounts is 6 seconds and up. A synchronous call would drag the poll cadence, and
+#    near the threshold that cadence is 60s -- 6 seconds is a tenth of a whole period.
+# ⚠️ A lock prevents pile-up: if the previous run has not finished, do not start another.
+#    Without the lock, a slow network makes these stack up indefinitely.
 # 到点就在**后台**生成一次快照。
 # ⚠️ 必须后台跑：probe 每个账号约 2 秒、三个账号 6 秒起，同步调用会把轮询节拍拖垮，
 #    而轮询在近阈值时收紧到 60s —— 拖 6 秒就是十分之一个周期。
@@ -191,6 +240,9 @@ quota_snapshot_refresh_due() {
   return 0
 }
 
+# Shadow reconciliation: record side by side what the snapshot says and what the ledger
+# already holds, so that afterwards someone can judge whether this source may be trusted.
+# It writes a log line and changes no state whatsoever.
 # 影子对账：把快照说的和台账现有的并排记一笔，供事后判断能不能放行。
 # 只写日志，不改任何状态。
 quota_snapshot_shadow_compare() {
@@ -206,19 +258,27 @@ quota_snapshot_shadow_compare() {
         | join(" ")
       | "snapshot(\($n - $g)s ago) " + .' 2>/dev/null) || return 0
   [[ -n "$line" ]] || return 0
+  # Take only in-service accounts on the ledger side too, so the two line up one to one.
   # 台账侧同样只取在役账号，便于逐个对照
   local ledger
   ledger=$(quota_state_read 2>/dev/null | jq -r --argjson oos "$(quota_out_of_service_json)" '
       [ (.accounts // {}) | to_entries[]
         | select(.key as $k | ($oos | index($k)) == null)
         | "\(.key|split("@")[0])=\(.value.five // "?")/\(.value.week // "?")%" ] | join(" ")' 2>/dev/null)
+  # ⚠️ The reconciliation line is logged only when the **content changes**. Once decisions
+  #    moved to every beat, this went from one line a minute to one every 10s -- 2183
+  #    lines a day. A per-line heartbeat buries the actual changes, and changes are the
+  #    entire point of reconciling. "Still alive" is already answered by the snapshot
+  #    file's own generated_at; the log does not need to restate it on every line.
+  # ⚠️ The dedup signature goes in a **side file**, never in the ledger. "Shadow
+  #    reconciliation touches not one byte of the ledger" is what the word shadow MEANS
+  #    here, and it is a strong invariant the regression suite guards -- weakening it to
+  #    save a few log lines is a bad trade.
   # ⚠️ 对账日志只在**内容变化**时打。拆成每拍决策之后，这行从每分钟一条变成每 10s 一条，
-  #    08-22 起每天 2183 行 —— 一份逐行心跳会把真正的变化埋掉，而对账要看的恰恰是变化。
+  #    最多时每天 2183 行 —— 一份逐行心跳会把真正的变化埋掉，而对账要看的恰恰是变化。
   #    「还活着」由快照文件自己的 generated_at 提供，不需要日志逐行复述。
   # ⚠️ 去重签名写**旁路文件**，不写台账。「影子对账一个字节都不碰台账」是「影子」这个词
   #    的定义，也是回归里守着的强不变量 —— 为了省几行日志去弱化它不划算。
-  #    （台账里已有 scan_menus_ts 之类的记账字段，但那些是**运维动作**的痕迹；
-  #      影子路径不同，它的全部承诺就是「只看不碰」。）
   local _cmp_sig _cmp_prev _cmp_f="${QUOTA_SNAPSHOT_FILE}.compare-sig"
   _cmp_sig=$(printf '%s|%s' "${line#*) }" "${ledger:-none}" | sha256sum | cut -c1-16)
   _cmp_prev=$(cat "$_cmp_f" 2>/dev/null || true)
@@ -232,6 +292,8 @@ quota_account_retired() { [[ " $QUOTA_RETIRED_ACCOUNTS " == *" $1 "* ]]; }
 
 quota_account_paused()  { [[ " $QUOTA_DISABLED_ACCOUNTS " == *" $1 "* ]]; }
 
+# In service = neither retired nor paused. Both "may we switch to it" and "does it count
+# in the denominator" use this one test.
 # 在役 = 既没退役也没暂停。凡是「能不能切过去」「算不算进分母」都用这个判据。
 quota_account_out_of_service() { quota_account_retired "$1" || quota_account_paused "$1"; }
 
@@ -284,20 +346,32 @@ quota_identity_read() {
           | join("\u001f")' "$f" 2>/dev/null
 }
 
+# quota_iso_epoch — ISO8601 with an explicit offset -> epoch.
+# The client writes "2026-08-11T08:10:00.492913+00:00": the offset is carried explicitly,
+# GNU date takes it directly, and no local time-zone inference happens anywhere -- so the
+# 8-hour bug of the earlier implementation **cannot occur here**.
+# (That implementation fell back to `tz=$(date +%Z)`, which on the machine in question
+#  returned a bare abbreviation that glibc treated as UTC+0, shifting everything by 8
+#  hours. Measured: the same "resets 3:10pm" parsed once as 15:10 and once as 23:10.)
 # quota_iso_epoch — 带偏移的 ISO8601 → epoch。
-# cc 写的是 "2026-08-11T08:10:00.492913+00:00"，偏移显式携带 → GNU date 直接吃，
+# 客户端写的是 "2026-08-11T08:10:00.492913+00:00"，偏移显式携带 → GNU date 直接吃，
 # 不经过任何本地时区推断，因此**不存在**旧实现那个 8 小时 bug
-# （旧实现兜底用 `tz=$(date +%Z)`，本机返回裸 `CST`，glibc 把它当 UTC+0 → 整体偏 8 小时；
-#  实测：同一句 "resets 3:10pm" 一次解析成 15:10 一次解析成 23:10）。
+# （旧实现兜底用 `tz=$(date +%Z)`，那台机器返回一个裸缩写，glibc 把它当 UTC+0 →
+#  整体偏 8 小时；实测：同一句 "resets 3:10pm" 一次解析成 15:10 一次解析成 23:10）。
 quota_iso_epoch() {
   local iso="$1"
   [[ -z "$iso" || "$iso" == "null" ]] && return 1
   date -d "$iso" +%s 2>/dev/null
 }
 
+# ── Shared persistence for the shadow samplers ──────────────────────────
+# These files exist only for later comparison work, and deliberately do NOT reuse
+# quota_state_merge. Physical separation keeps the asynchronous OAuth writer from racing
+# the 10-second main poller over the same atomic rename, and it makes "never participates
+# in a decision" something a reader can verify mechanically rather than take on trust.
 # ── 影子采样公共落盘 ────────────────────────────────────────────────────
 # 这些文件只供后续对比研究，不能复用 quota_state_merge；物理隔离可防止异步 OAuth
-# writer 与 10 秒主 poller 竞争同一个 atomic rename，也让“绝不参与决策”可机械审计。
+# writer 与 10 秒主 poller 竞争同一个 atomic rename，也让「绝不参与决策」可机械审计。
 quota_shadow_json_read() {
   local file="$1"
   [[ -s "$file" ]] && jq -e . "$file" >/dev/null 2>&1 && cat "$file"
@@ -326,12 +400,17 @@ quota_shadow_append_event() {
 
 quota_shadow_credential_marker() {
   [[ -r "$QUOTA_CREDENTIALS_FILE" ]] || return 1
+  # Store only inode / size / nanosecond mtime. The token is neither copied nor hashed.
   # 只存 inode/大小/纳秒 mtime，不复制 token，也不留下 token hash。
   stat -Lc '%d:%i:%s:%y' "$QUOTA_CREDENTIALS_FILE" 2>/dev/null
 }
 
 quota_shadow_now() { date +%s; }
 
+# Emit the current experiment stage as JSON. The first call atomically pins started_at, so
+# both shadow sources share one clock.
+# Stages of 20/40/60/120 seconds, ten minutes each; after the fourth it does not loop and
+# simply stays at 120.
 # 输出当前实验档位 JSON。首次调用原子钉住 started_at，两个影子来源因此共用同一时钟。
 # 20/40/60/120 秒每档 10 分钟；第四档结束后不循环，继续保持 120 秒。
 quota_shadow_schedule() (
@@ -386,6 +465,8 @@ quota_shadow_schedule() (
        penalty_until:(if $penalty_until > 0 then $penalty_until else null end)}'
 )
 
+# On a 429, raise the effective interval by at least one step and hold it for a stage.
+# Repeated 429s keep climbing: 40 -> 60 -> 120 -> 240 -> 480 -> 600.
 # 429 时把有效间隔至少升一档并保持一个阶段；重复 429 会继续 40→60→120→240→480→600。
 quota_shadow_schedule_penalize() (
   local now="$1" current="$2" lock_fd state bumped existing until next_state
@@ -416,12 +497,16 @@ quota_shadow_source_interval() {
   local source="$1" cadence="$2" interval
   case "$source" in
     statusline) interval=$(printf '%s' "$cadence" | jq -r '.planned_interval_seconds // 120' 2>/dev/null) ;;
+    # ⚠️ The fallback MUST equal QUOTA_SHADOW_OAUTH_INTERVAL. If a missing cadence field
+    #    dropped this back to 120, it would quietly bypass the measured conclusion that
+    #    180 seconds is the safe floor -- and nothing would report an error.
     # ⚠️ 兜底值必须与 QUOTA_SHADOW_OAUTH_INTERVAL 一致：cadence 缺字段时若掉回 120，
     #    就绕过了「180 秒才安全」这个实测结论，而且不会有任何报错。
     oauth_api)  interval=$(printf '%s' "$cadence" | jq -r --argjson d "$QUOTA_SHADOW_OAUTH_INTERVAL" '.interval_seconds // $d' 2>/dev/null) ;;
     *) return 1 ;;
   esac
   [[ "$interval" =~ ^[0-9]+$ ]] || interval=120
+  # The OAuth line may never go below the measured safe floor.
   # oauth 这条不许低于实测安全下限
   [[ "$source" == "oauth_api" ]] && (( interval < QUOTA_SHADOW_OAUTH_INTERVAL )) \
     && interval=$QUOTA_SHADOW_OAUTH_INTERVAL
@@ -437,6 +522,9 @@ quota_source_append() (
   quota_shadow_append_event "$QUOTA_SOURCE_EVENTS" "$event"
 )
 
+# /usage is currently the only source that drives decisions. Every successfully parsed
+# frame is also mirrored into the unified per-event log so the sources can be aligned in
+# time afterwards.
 # /usage 是当前唯一决策来源；成功解析的每一帧同时镜像到统一逐次日志，供三方按时间对齐。
 quota_source_log_usage() {
   local observed="$1" email="$2" uuid="$3" five="$4" five_reset="$5" week="$6" week_reset="$7"
@@ -520,7 +608,10 @@ quota_shadow_statusline_ingest() (
 
   now=$(quota_shadow_now)
   cadence=$(quota_shadow_schedule "$now" 2>/dev/null || echo '{}')
-  # OAuth 429 的 penalty 只约束网络直查；statusLine 是 Claude Code 的本地回调，
+  # The OAuth 429 penalty constrains only the direct network query. statusLine is a local
+  # callback from the client, so it keeps sampling on the original four-stage plan --
+  # otherwise its refresh timeliness could not be assessed independently.
+  # OAuth 429 的 penalty 只约束网络直查；statusLine 是客户端的本地回调，
   # 继续按原始四阶段计划采样，才能独立评估它的刷新及时性。
   interval=$(quota_shadow_source_interval statusline "$cadence" 2>/dev/null || echo 120)
   cadence=$(printf '%s' "$cadence" | jq -c --argjson interval "$interval" \
@@ -721,6 +812,8 @@ quota_shadow_retry_after() {
   printf '%s' "$(( epoch - now ))"
 }
 
+# return 0 = due. After a 401, a change in the credential file's generation releases this
+# early; the script itself never refreshes a token.
 # return 0 = 到点。401 后凭据文件代次一变就提前放行，脚本本身不刷新 token。
 quota_shadow_oauth_due() {
   local now="${1:-$(quota_shadow_now)}" state next outcome old_marker marker
@@ -737,6 +830,9 @@ quota_shadow_oauth_due() {
   return 1
 }
 
+# One OAuth shadow sample. However it fails -- network, schema, identity drift, or the
+# write itself -- the error is never propagated to the main poller loop. Events keep only
+# allowlisted fields; the response body and the token never enter a log.
 # 单次 OAuth 影子采样。无论网络、schema、身份漂移或落盘如何失败，都不把错误传播给
 # poller 主循环；事件只保留 allowlist 字段，响应正文与 token 永不入日志。
 quota_shadow_oauth_sample() (
@@ -797,12 +893,24 @@ quota_shadow_oauth_sample() (
       outcome="network_error"
       http=""
     elif [[ "$http" == "200" ]]; then
+      # ⚠️ Empty fields need a placeholder; plain @tsv will not do. A tab is an IFS
+      #    **whitespace** character, so `read` treats **consecutive tabs as one
+      #    separator** -- one empty field in the middle and everything after it shifts:
+      #      server sends  0 <empty> 31 <ISO>   is read as  five=0 five_iso=31
+      #                                                     week=<ISO> week_iso=empty
+      #    and resets_at is precisely what is empty while a window sits idle. The old
+      #    "all four must be numbers" test had been **masking this shift** all along: it
+      #    kept the shifted result out, so the bug never showed up as a wrong NUMBER, only
+      #    as schema_error (25 occurrences over three days).
+      #    ⭐ 判据太严把一个解析缺陷伪装成了服务端问题：outcome 看着像对方返回畸形数据。
+      #    ⇒ The thing to fix was the parsing, not the test. Replace null with a "-"
+      #    placeholder and the fields cannot collapse.
       # ⚠️ 空字段必须占位，不能直接 @tsv。tab 属于 IFS **空白**字符，read 会把
       #    **连续的制表符当成一个分隔符** —— 中间字段一空，后面全部错位：
       #      服务端 0 <空> 31 <ISO>  会被读成  five=0 five_iso=31 week=<ISO> week_iso=空
       #    而 resets_at 恰恰在窗口闲置时就是空的。原来那条「四个都必须是数字」的判据
       #    其实一直在**掩盖这个错位**：它把错位的结果挡在门外，于是从没表现成错误的
-      #    数值，只表现为 schema_error（2026-08-22～24 三天 25 次）。
+      #    数值，只表现为 schema_error（三天 25 次）。
       #    ⇒ 该修的是解析不是判据。null 统一换成 "-" 占位，字段就不会塌。
       values=$(jq -er '[.five_hour.utilization, .five_hour.resets_at,
                          .seven_day.utilization, .seven_day.resets_at]
@@ -819,10 +927,27 @@ quota_shadow_oauth_sample() (
       else
         five=""; week=""; five_epoch=""; week_epoch=""
       fi
+      # ⚠️ resets_at is **optional**: while a window has sat idle the server simply does
+      #    not return it. The first version demanded all four fields be numeric, so every
+      #    time the five-hour window was idle the whole sample was judged schema_error and
+      #    discarded -- **throwing away a perfectly good weekly figure with it**. 25
+      #    samples (about 5%) were lost over three days, all in low-usage periods of the
+      #    current account.
+      #    ⭐ And it disguised itself well: outcome=schema_error reads as "the server sent
+      #    something malformed", when in fact OUR test was too strict.
+      #
+      # ⚠️ But it must not simply let everything through -- that would accept genuinely
+      #    malformed responses too. Judge the two cases apart:
+      #      utilisation 0 and no resets_at      -> normal (window never started; there is
+      #                                             no reset to speak of)
+      #      utilisation non-zero, no resets_at  -> still schema_error (the server ought to
+      #                                             know when it resets)
+      #    Decisions use the utilisation; resets_at only affects reset-watching, and null
+      #    is a fine record for it.
       # ⚠️ resets_at 是**可选**的：窗口闲着没用过时服务端根本不返回它。
       #    首版要求四个字段全是数字，于是每当五小时窗口空闲，整条样本被判成
-      #    schema_error 整个丢掉 —— **连好好的周额度一起扔了**。2026-08-22～24
-      #    三天丢了 25 条（约 5%），全部集中在当前账号的低用量时段。
+      #    schema_error 整个丢掉 —— **连好好的周额度一起扔了**。三天丢了 25 条（约 5%），
+      #    全部集中在当前账号的低用量时段。
       #    而且它伪装得好：outcome=schema_error 看起来像服务端返回了畸形数据，
       #    实际是我们的判据太严。
       #
@@ -978,6 +1103,8 @@ quota_shadow_poller_loop() {
     [[ "$next" =~ ^[0-9]+$ ]] || next=0
     wait_s=$(( next - now ))
     (( wait_s < 1 )) && wait_s=1
+    # Wake at least every 30 seconds, so the process can be replaced and a person can watch
+    # it; nothing goes on the network before its due time.
     # 最长 30 秒醒一次，便于进程替换和人工观察；due 未到不会发网络请求。
     (( wait_s > 30 )) && wait_s=30
     sleep "$wait_s"
@@ -1021,6 +1148,8 @@ quota_snapshot() {
   printf '%s\n' "$raw"
 }
 
+# quota_snapshot_fresh — snapshot plus freshness gate. Anything stale returns 1, i.e. it
+# is treated as "unknown" and nothing acts on it.
 # quota_snapshot_fresh — 快照 + 新鲜度闸。陈旧一律 return 1（当「未知」，不动作）。
 quota_snapshot_fresh() {
   local now="$1" max_age snap ft
