@@ -1148,6 +1148,73 @@ if [[ "$hm_plus8" == "16:10" && "$hm_utc" == "08:10" ]]; then
 else
   fail "渲染不随时区变化，说明某处把偏移写死了（+8=$hm_plus8 utc=$hm_utc）"
 fi
+
+echo "── 渲染时刻：必须是「UTC 渲染 + 偏移量算术」，不许在渲染时查时区库 ──"
+# G-4 事故 (a)/(b) 的守卫是 `lib/state.sh :: quota_fmt_ts()`，但在 2026-08-31 之前
+# **整套回归一次都没有调用过它**：把它改回 `TZ=$QUOTA_TZ_LABEL date -d @ts`（正是那次
+# 事故的写法，本机实测把 08:26 渲染成 00:26）之后，套件仍然 PASS 197 FAIL 0。
+# ⭐ 这就是本仓自己反复写下的那句话的又一个实例：**一条从来没红过的守卫，绿了也不说明问题**。
+# ⚠️ 三条里只有后两条有分辨力。第①条（换进程 TZ 结果不变）对**修复前那版也成立**——
+#    因为它查的是写死的 label——所以单独用它是恒真的。留着它是因为它盯的是另一件事
+#    （渲染不受调用方环境影响），但它不能替代②③。
+_fmt_e=1756600000                       # 2026-08-31 08:26:40 +0800 / 00:26:40 UTC
+_fmt_utc=$(TZ=UTC   quota_fmt_ts "$_fmt_e" '%H:%M')
+_fmt_p8=$(TZ=CST-8  quota_fmt_ts "$_fmt_e" '%H:%M')
+_fmt_z=$(QUOTA_TZ_OFFSET_SEC=0 quota_fmt_ts "$_fmt_e" '%H:%M')
+if [[ "$_fmt_utc" == "$_fmt_p8" ]]; then
+  pass "渲染不随调用方进程 TZ 变化（渲染时没查时区库）"
+else
+  fail "渲染随进程 TZ 变了（TZ=UTC → $_fmt_utc，TZ=CST-8 → $_fmt_p8），说明渲染时查了时区库"
+fi
+if [[ "$_fmt_utc" == "08:26 +0800" ]]; then
+  pass "epoch 按 QUOTA_TZ_OFFSET_SEC=+8 渲染成 08:26（不是 UTC 的 00:26）"
+else
+  fail "渲染时刻错了（got=$_fmt_utc，期望 08:26 +0800）——差 8 小时正是事故 (a) 的形状"
+fi
+if [[ "$_fmt_z" != "$_fmt_utc" ]]; then
+  pass "改 QUOTA_TZ_OFFSET_SEC 会改变渲染结果（偏移量真的参与了算术）"
+else
+  fail "把偏移量改成 0 渲染结果不变（$_fmt_z），说明渲染没用它，而是查了别的东西"
+fi
+unset _fmt_e _fmt_utc _fmt_p8 _fmt_z
+
+echo "── 换算常数：增量只能在同一主体内累加，跨账号必须断开 ──"
+# G-7 事故：累加两个窗口的增量算换算常数，首次实测算出 −0.434（物理上不可能，两个窗口
+# 都只会涨）。根因是样本里混进了监控还挂在**上一个账号**时的读数，值在两个账号的数之间
+# 来回跳。守卫是 `lib/state.sh :: quota_ratio_update()` 里的 `l_acct == acct`。
+# ⚠️ 2026-08-31 之前这个函数在整套回归里**只被打桩、从未被真实调用**：把它整个掏空成
+#    `quota_ratio_update() { return 0; }` 之后，套件仍然 PASS 197 FAIL 0。
+# ⭐ 期望值写成「哪几个数」而不是「有没有报错」：跨主体累加不报错，它只是把一个物理上
+#    不可能的常数安静地写进账里。
+_ru_state="$QUOTA_STATE"
+QUOTA_STATE="$TMP/ratio-subject.json"; echo '{}' > "$QUOTA_STATE"
+_ru(){ jq -r '"\(.ratio.five_total // 0)/\(.ratio.week_total // 0)"' "$QUOTA_STATE"; }
+quota_ratio_update 1000 ratioA@x 10 5
+_ru_1=$(_ru)
+quota_ratio_update 1010 ratioA@x 30 9
+_ru_2=$(_ru)
+quota_ratio_update 1020 ratioB@x 80 90     # 换账号：这一步一个增量都不许进账
+_ru_3=$(_ru)
+quota_ratio_update 1030 ratioB@x 85 92
+_ru_4=$(_ru)
+if [[ "$_ru_1" == "0/0" && "$_ru_2" == "20/4" ]]; then
+  pass "同一账号内累加增量（10→30 记 +20，5→9 记 +4；首帧只立基线不累加）"
+else
+  fail "同账号累加错了（首帧=$_ru_1 期望 0/0；第二帧=$_ru_2 期望 20/4）"
+fi
+if [[ "$_ru_3" == "20/4" ]]; then
+  pass "换到另一个账号那一帧不累加（跨主体差值不进账，−0.434 那次的根因）"
+else
+  fail "跨账号的差值被累加进了同一个常数（got=$_ru_3，期望仍是 20/4）"
+fi
+if [[ "$_ru_4" == "25/6" ]]; then
+  pass "换账号之后以新账号为基线继续累加（断开的是跨主体那一步，不是整条链）"
+else
+  fail "换账号后没能重新建立基线继续累加（got=$_ru_4，期望 25/6）"
+fi
+QUOTA_STATE="$_ru_state"
+unset _ru_state _ru_1 _ru_2 _ru_3 _ru_4
+unset -f _ru
 }
 
 # ── monitor lifecycle / monitor 生命周期 ──

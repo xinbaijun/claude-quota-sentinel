@@ -202,6 +202,61 @@ s5(){
     || { echo "lib/switch.sh still assigns reason instead of accumulating it"; return 1; }
 }
 
+# ── S7: the READ side must scan the OLD backup location too, permanently.
+#
+# 🔴 G-8 事故：备份目录换位置时只改了**写入**那一侧，**读取**那一侧仍然只扫新位置。
+#    实测有两个账号的凭据只存在于旧目录里,其中一个当时还是在役账号 —— 一次
+#    「只是换个目录」的改动会让一个正在用的账号从名册里当场消失。守卫是
+#    `account-switch :: backup_roots()`,它必须同时返回旧的扁平布局与 BACKUP_DIR_NAME。
+# ⚠️ 2026-08-31 之前这条守卫**一条判据都没有**:回归套件、tools/switch-selftest.sh 与
+#    test/posctrl.sh 里 `backup_roots` / `backup_candidates` 的出现次数都是 0。把
+#    `backup_roots()` 改成只返回新目录(即事故原形)之后,三者仍然全绿。
+#    ⭐ 现有的 S4 摸不到这一格:它自己种的备份就在**新**目录里,所以旧目录被丢掉时它照样绿。
+#    判据必须是「**只**存在于旧位置的那一份看不看得见」,不是「回滚跑不跑得通」。
+# ── S7 读取侧必须永久扫描旧备份位置。
+s7(){
+  local home="$WORK/s7/home"
+  rm -rf "$WORK/s7"; mkdir -p "$home/claude-backups"
+  plant "$home/claude-backup-before-switch-20260101-000000"                  '2026-01-01 00:00'
+  plant "$home/claude-backups/claude-backup-before-switch-20260601-000000"   '2026-06-01 00:00'
+  python3 - "$REPO" "$home" <<'PY7' || return 1
+import sys, types
+from pathlib import Path
+mod = types.ModuleType("acs"); sys.modules["acs"] = mod
+src = open(f"{sys.argv[1]}/account-switch", encoding="utf-8").read()
+exec(compile(src, "account-switch", "exec"), mod.__dict__)
+found = sorted(p.name for p in mod.backup_candidates(Path(sys.argv[2])))
+want = ["claude-backup-before-switch-20260101-000000",
+        "claude-backup-before-switch-20260601-000000"]
+if found != want:
+    missing = [n for n in want if n not in found]
+    print(f"backup_candidates() returned {found}; missing {missing}. "
+          f"A backup that exists only in the OLD flat layout is invisible to the read "
+          f"side, which is exactly the G-8 incident: the roster quietly gets shorter.")
+    raise SystemExit(1)
+PY7
+}
+# negative control: the pre-fix read side, which scanned the new directory only.
+# 负控:修复前的读取侧,只扫新目录。它必须在 S7 上失败,否则 S7 没有牙。
+s7_neg(){
+  local home="$WORK/s7n/home"
+  rm -rf "$WORK/s7n"; mkdir -p "$home/claude-backups"
+  plant "$home/claude-backup-before-switch-20260101-000000"                  '2026-01-01 00:00'
+  plant "$home/claude-backups/claude-backup-before-switch-20260601-000000"   '2026-06-01 00:00'
+  python3 - "$REPO" "$home" <<'PY7N'
+import sys, types
+from pathlib import Path
+mod = types.ModuleType("acs"); sys.modules["acs"] = mod
+src = open(f"{sys.argv[1]}/account-switch", encoding="utf-8").read()
+exec(compile(src, "account-switch", "exec"), mod.__dict__)
+mod.backup_roots = lambda root_home: (root_home / mod.BACKUP_DIR_NAME,)   # <-- pre-fix
+found = sorted(p.name for p in mod.backup_candidates(Path(sys.argv[2])))
+want = ["claude-backup-before-switch-20260101-000000",
+        "claude-backup-before-switch-20260601-000000"]
+raise SystemExit(0 if found == want else 1)
+PY7N
+}
+
 echo "switch-selftest: positive checks run against the real functions in lib/"
 ck    S1  "roster is one JSON document for every empty/non-empty combination" \
           "exactly 1 document, usable with --argjson"                          s1
@@ -214,6 +269,9 @@ ckred S3n "  negative control: lexical ordering deletes the newest"            s
 ck    S4  "the safety backup a successful rollback printed still exists" \
           "the printed path is a directory"                                    s4
 ck    S5  "both crossed lines appear in the ledger reason"                     "both named" s5
+ck    S7  "a backup that exists only in the OLD location is still discoverable" \
+          "backup_candidates() returns both roots' backups"                    s7
+ckred S7n "  negative control: the pre-fix read side (new directory only) misses it" s7_neg
 
 # ── S6: the DoD-4 control's own output must be readable by the thing that checks it.
 #

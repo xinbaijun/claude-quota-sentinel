@@ -259,6 +259,31 @@ ablate p5-timezone-offset \
     '[[ -n "$tz" ]] || tz=$(date +%Z)' \
     '[[ -n "$tz" ]] || tz=CST-8'
 
+# ⚠️ 上面那条消融动的是**冻结对照组**，证明的是「对照组会复现 8 小时偏差」。它不覆盖
+#    出厂渲染函数 `lib/state.sh :: quota_fmt_ts()`——2026-08-31 实测：把 quota_fmt_ts
+#    改回 `TZ=$QUOTA_TZ_LABEL date -d @ts`（事故 (a) 的写法，本机把 08:26 渲染成
+#    00:26），对照组那条消融照常绿、整套回归也照常 PASS 197 FAIL 0。
+#    ⭐ 「守卫存在」与「守卫被证明会红」是两件事，这一格补的是后者。
+ablate fmtts-zonedb-render \
+  "渲染时刻必须是 UTC 渲染 + 偏移量算术，不许在渲染时查时区库" --fast \
+  "差 8 小时正是事故 (a) 的形状" \
+  m_sed lib/state.sh \
+    'date -u -d "@$(( ts + QUOTA_TZ_OFFSET_SEC ))" "+$fmt"' \
+    'TZ="$QUOTA_TZ_LABEL" date -d "@$ts" "+$fmt"'
+
+# ══ 4b. 跨主体累加 / cross-subject accumulation ═════════════════════════
+# 事故：累加两个窗口的增量算换算常数，首次实测算出 −0.434（物理上不可能，两个窗口都
+# 只会涨）。根因是样本里混进了监控还挂在**上一个账号**时的读数。守卫是
+# `lib/state.sh :: quota_ratio_update()` 里的 `l_acct == acct`。
+# ⚠️ 2026-08-31 之前这个函数在整套回归里**只被打桩、从未被真实调用**：把它整个掏空成
+#    `return 0` 之后套件仍然 PASS 197 FAIL 0 ⇒ 守卫在纸面上存在、在任何机器上恒绿。
+ablate ratio-cross-subject \
+  "换算常数的增量只能在同一主体内累加，跨账号必须断开" --fast \
+  "跨账号的差值被累加进了同一个常数" \
+  m_sed lib/state.sh \
+    '"$l_acct" == "$acct" && ' \
+    ''
+
 # ══ 5. the construction-time leak assertion / 构造期泄漏断言 ═════════════
 ablate state-dir-leak \
   "构造期断言：任何 QUOTA_* 路径指进真状态目录就中止" --fast \

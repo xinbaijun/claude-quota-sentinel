@@ -320,17 +320,39 @@ checkable baseline rather than a shrug.
   **为什么没进已公开的 allow 文件**：`tools/dod4-allow.example.txt` 自己写着准入规则——
   供应商域名、以及「某个你判断没问题的具体地址」**都不许**进去，站点豁免应写进 `.local`。
   为了让今天这次扫描变绿而给一条长期规则破例，就是那条规则以后拦不住别人的开始。
-- **Controls, both run 2026-08-31** — ① after adding the allowance,
+- 🩸 **Control ① below was withdrawn on 2026-08-31 — it could not have answered the
+  question it was cited for.** `tools/dod4-scan.posctrl.sh` clones this repo into a
+  throwaway directory and **plants its own** `dod4-{patterns,paths,identity}.local.txt`
+  markers there; `dod4-allow.local.txt` is gitignored and therefore **cannot travel into
+  that clone at all**. So `RANGE C-message fired OK` is produced in an environment where
+  the allowance does not exist, and it would say exactly the same thing if the allowance
+  *had* switched the range off. **Measured, not argued**: with the allowance deliberately
+  widened to the whole domain, `tools/dod4-scan.sh` reported **`CLEAN hits=0`** — fully
+  blinded — while `tools/dod4-scan.posctrl.sh` still reported **`RANGE C-message fired OK`**
+  and `POSCTRL_RESULT=PASS`. ⭐ The control proves the C range is **traversed**; it cannot
+  prove the C verdict is **unblinded**. ⇒ There is currently **no standing control** on
+  this allowance, and the shipped positive control structurally cannot become one.
+  🩸 **下面的控 ① 于 2026-08-31 撤回——它回答不了当初引用它去回答的那个问题。**
+  `tools/dod4-scan.posctrl.sh` 把本仓 clone 进一次性目录，并在那里**自己种**
+  `dod4-{patterns,paths,identity}.local.txt` 标记；而 `dod4-allow.local.txt` 已 gitignore，
+  **根本进不了那份 clone**。于是 `RANGE C-message fired OK` 是在「豁免不存在」的环境里
+  产出的——就算豁免真的把这个范围关掉了，它也会说同一句话。**这是实测不是论证**：把豁免
+  故意放宽成整域之后，`tools/dod4-scan.sh` 报 **`CLEAN hits=0`**（完全致盲），而
+  `tools/dod4-scan.posctrl.sh` 仍报 **`RANGE C-message fired OK`**、`POSCTRL_RESULT=PASS`。
+  ⭐ 它证明的是 C 范围**被走到了**，证明不了 C 范围的**结论没被蒙住**。
+  ⇒ 这条豁免目前**没有常设控**，而出厂的那条正控结构上也当不了它的控。
+- **Controls, both run 2026-08-31** — ① ~~after adding the allowance,
   `tools/dod4-scan.posctrl.sh` still reports `RANGE C-message fired OK` ⇒ the allowance did
-  not switch a range off; ② in a throwaway repo, a **different local part at the same
+  not switch a range off~~ **（撤回，见上一条 / withdrawn, see above）**; ② in a throwaway repo, a **different local part at the same
   domain** is still reported while the allowed literal is not ⇒ the allowance is
   literal-scoped, not domain-scoped. The recipe for ② is in the allow file itself.
   ⚠️ The second address is described rather than written out, and that is not squeamishness:
   writing an example address into this file makes the scanner report **this file**, and the
   person investigating becomes the event source. (Measured while writing this paragraph —
   the first draft spelled it out and turned range A red, from 0 to 1.)
-  **两条控，2026-08-31 都跑过**：① 加完豁免后 `tools/dod4-scan.posctrl.sh` 的
-  `RANGE C-message` 仍 `fired OK` ⇒ 没有用 allowlist 把一整个范围关掉；② 在一次性仓里，
+  **两条控，2026-08-31 都跑过**：① ~~加完豁免后 `tools/dod4-scan.posctrl.sh` 的
+  `RANGE C-message` 仍 `fired OK` ⇒ 没有用 allowlist 把一整个范围关掉~~
+  **（已撤回：那条控在「豁免不存在」的 clone 里跑，答不了这一问；实测见上）**；② 在一次性仓里，
   同域另一个地址仍被报出、被豁免的那个字面串不被报出 ⇒ 豁免的射程是**字面串**不是域。
   ② 的复跑配方写在 allow 文件里。
   ⚠️ 第二个地址在这里只**描述**、不写出来，这不是讲究：把一个示例地址写进本文件，扫描器就会

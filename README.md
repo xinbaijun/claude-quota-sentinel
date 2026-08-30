@@ -4,12 +4,25 @@ Watch Claude subscription quota across several of your own accounts, switch when
 threshold is reached, and keep an audit trail of every switch.
 在你自己的多个 Claude 账号之间盯额度、到线切号，并为每一次切换留下可追溯的账目。
 
-**Every guard in here can be made to go red on demand, and each one is annotated with the
-incident that forced it into existence.** That is the point of this repository — more than
-the switching itself, which several other projects do more comfortably (see
+**Nine of the ten guard entries below ship an executable guard that can be made to go red
+on demand, and every entry is annotated with the incident that forced it into existence.**
+That is the point of this repository — more than the switching itself, which several other
+projects do more comfortably (see
 [What this does not do](#what-this-does-not-do--不解决什么)).
-**这里的每一条守卫都能当场证明它会红，且每一条都标着逼它出现的那次事故。**
+⚠️ **The denominator is stated, not implied**: the tenth entry (**G-3**) documents a guard
+whose executing half **was not extracted into this repository**, and a handful of named
+mechanisms inside otherwise-proven entries are **unproven rather than proven**. Both lists
+are written out in
+[What the red-state claim covers](#what-the-red-state-claim-covers--这句总括声称的分母).
+⭐ A blanket claim whose denominator nobody can state is not a stronger claim, it is an
+unfalsifiable one.
+**下面十条里有九条带着可执行的守卫、且都能当场证明它会红；十条都标着逼它出现的那次事故。**
 这才是本仓的重点——切号本身有别的项目做得更顺手（见「不解决什么」）。
+⚠️ **分母是写出来的，不是暗示的**：第十条（**G-3**）记的那条守卫，其**执行的那一半没有
+被抽取进本仓**；另外还有若干条被点名的机制，落在「已证明会红」的条目里但**自身未被证明**。
+两张单子都逐条写在
+[这句总括声称的分母](#what-the-red-state-claim-covers--这句总括声称的分母) 里。
+⭐ 一句没人说得出分母的总括声称不是更强的声称，是一句无法否证的声称。
 
 > A one-line locator, so you know within ten seconds whether this is your problem at all:
 > **a credential's "expires in 2 hours" tells you almost nothing about whether the account
@@ -344,12 +357,17 @@ arrive here with a symptom, not with a date. Each entry follows the same four pa
 按**失效面**组织，不按事故编号、不按时间线——你是带着症状来的，不是带着日期来的。
 每条四段：**问题形态 / 正确做法 / 为什么 / 什么时候不该这么做**。
 
-Every guard named below **exists in this repository** and can be made to go red; the
-`test/posctrl.sh` table at the end proves it. Guards are cited as
+Every guard named below **exists in this repository** and can be made to go red — with the
+exceptions listed in [What the red-state claim covers](#what-the-red-state-claim-covers--这句总括声称的分母),
+which you should read before treating this sentence as a blanket guarantee. The evidence is
+the `test/posctrl.sh` table at the end **plus `tools/switch-selftest.sh`** (G-8's control
+lives there, and `posctrl.sh` does not run it). Guards are cited as
 `file :: function()` rather than line numbers, **because line numbers drift and a stale
 line reference is worse than none**.
-下面点名的每一条守卫**都在本仓真实存在**且能被证明会红（末尾 `test/posctrl.sh` 那张表
-就是证据）。守卫按 `文件 :: 函数()` 引用而不是行号，**因为行号会漂，而一个失效的行号
+下面点名的每一条守卫**都在本仓真实存在**且能被证明会红——例外逐条列在
+「这句总括声称的分母」一节，把本句当无条件保证之前请先读那一节。证据是末尾
+`test/posctrl.sh` 那张表**外加 `tools/switch-selftest.sh`**（G-8 的控在后者里，
+而 `posctrl.sh` 不跑它）。守卫按 `文件 :: 函数()` 引用而不是行号，**因为行号会漂，而一个失效的行号
 引用比没有更糟**。
 
 ### G-1 · A number that went up can still be older than the one before it
@@ -569,6 +587,13 @@ line reference is worse than none**.
   来回蹦。清干净之后真值是 **0.120**，各独立分段都落在 0.10–0.125。
 - **Instead / 正确做法** — accumulate **only** when the account is unchanged *and* neither
   percentage went backwards: `lib/state.sh :: quota_ratio_update()`.
+  ⚠️ **Until 2026-08-31 this function was only ever stubbed, never actually called by the
+  suite**: replacing it wholesale with `{ return 0; }` left the run at `PASS 197 FAIL 0`.
+  The control is now the `换算常数：增量只能在同一主体内累加` block plus the
+  `ratio-cross-subject` ablation.
+  ⚠️ **2026-08-31 之前这个函数在整套回归里只被打桩、从未被真实调用**：把它整个换成
+  `{ return 0; }` 之后仍是 `PASS 197 FAIL 0`。现在的控是「换算常数」那一块断言加
+  `ratio-cross-subject` 消融。
   只在「账号未变」且「两个百分比都没回退」同时成立时才计入。
 - **Why / 为什么** — the negative number was **luck**: it was obviously wrong. The same
   contamination producing 0.08 or 0.15 would have looked entirely reasonable, and the
@@ -597,6 +622,22 @@ line reference is worse than none**.
 - **Instead / 正确做法** — the reading side scans **both** locations, and the old one is
   scanned permanently: `account-switch :: backup_roots()`.
   读的一侧新旧位置都扫，且旧位置永久保留扫描。
+  ⚠️ **Until 2026-08-31 this guard had no assertion, no ablation and no self-test case** —
+  `backup_roots` / `backup_candidates` appeared **zero** times in the suite, in
+  `test/posctrl.sh` and in `tools/switch-selftest.sh`. Dropping the old root (the incident
+  verbatim) left all three fully green. The control is now
+  `tools/switch-selftest.sh :: S7` + its negative control `S7n`; it plants a backup that
+  exists **only** in the old flat layout and requires `backup_candidates()` to find it.
+  ⭐ The pre-existing `S4` cannot cover this: it plants its own backups in the **new**
+  directory, so it stays green precisely when the old root is dropped. **"There is a
+  rollback test" was not the same claim as "the old root is still scanned."**
+  ⚠️ **2026-08-31 之前这条守卫零断言、零消融、零自检用例**：`backup_roots` /
+  `backup_candidates` 在回归套件、`test/posctrl.sh`、`tools/switch-selftest.sh` 里的出现
+  次数都是 **0**，把旧根丢掉（事故原形）之后三者全绿。现在的控是
+  `tools/switch-selftest.sh :: S7` 与负控 `S7n`：种一份**只**存在于旧扁平布局的备份，
+  要求 `backup_candidates()` 找得到它。⭐ 原有的 S4 覆盖不了这一格——它自己种的备份在
+  **新**目录里，旧根被丢掉时它恰好照常绿。**「有一条回滚测试」和「旧根仍在被扫描」
+  从来不是同一句话。**
 - **Why / 为什么** — the self-check for this kind of change almost always passes, because
   you verify "did the new file land in the right place" while the defect is in "can the old
   files still be found". It does not error; **the roster just quietly gets shorter**, and
@@ -1340,10 +1381,14 @@ API 响应上，而且不会有任何东西告诉你它冻住了**。这本身�
 ## Verifying the guards / 每条守卫怎么自证
 
 The hard claim of this repository is **not** an assertion count. It is:
-**every guard can be made to go red on demand, and that is shipped as a runnable artifact.**
+**every guard that ships here can be made to go red on demand, that is delivered as a
+runnable artifact, and the entries this does not cover are named rather than left to be
+inferred** — see [What the red-state claim covers](#what-the-red-state-claim-covers--这句总括声称的分母)
+just below.
 
-本仓的硬指标**不是**断言条数，而是：**每一条守卫都能当场证明它会红，而且这件事是作为
-可运行的产物交付的。**
+本仓的硬指标**不是**断言条数，而是：**凡是在本仓交付的守卫都能当场证明它会红、这件事是
+作为可运行的产物交付的，且它覆盖不到的条目是被点名的、不留给人猜**——见下面
+「这句总括声称的分母」。
 
 ```sh
 bash test/quota-sentinel.test.sh      # the suite / 回归套件
@@ -1364,18 +1409,78 @@ like perfect discriminating power while actually meaning the harness breaks ever
 未改动的副本必须全绿，没有它，「全都红了」看起来像分辨力满分，实际可能只说明这套脚手架
 把每一份副本都弄坏了。
 
-⚠️ **Two boundaries, stated rather than left to be assumed:**
+⚠️ **Four boundaries, stated rather than left to be assumed. The last two were added on
+2026-08-31, after boundary 2 was found being read as cover for guards with no assertion at
+all:**
 1. **Ablations mutate the *triggering condition*, not the guard itself.** Deleting a guard
    and observing that nothing fires measures "what it looks like with no guard", which is a
    different question.
 2. **Not every assertion has an ablation.** The ones that do were chosen for the class
    *"remove this and the system fails **silently**"*. An assertion without an ablation is
    not thereby proven worthless — it is unproven, which is not the same thing.
+3. ⚠️ **This exemption covers the assertion↔ablation pair, and nothing wider.** It says
+   some assertions lack an ablation; it does **not** excuse a guard that has **no
+   assertion at all**, which never enters the pair and so cannot be exempted by it. Two
+   such guards were found on 2026-08-31 (G-7's `quota_ratio_update()`, G-8's
+   `backup_roots()`) and both now have controls. **Do not cite boundary 2 against a guard
+   with zero assertions** — that is the reading under which "nothing tests this" and
+   "this is a documented exception" become the same sentence.
+4. ⚠️ **A proven entry is not a proven mechanism.** An entry that cites four functions is
+   proven when *one* of them goes red; the other three may still be unexercised. The ones
+   measured as unproven are named in
+   [What the red-state claim covers](#what-the-red-state-claim-covers--这句总括声称的分母).
 
-⚠️ **两条边界，写明而不是留给人猜**：①**消融动的是「触发条件」，不是守卫本身**——
+⚠️ **四条边界，写明而不是留给人猜（后两条是 2026-08-31 补的，起因是第②条被当成了
+「零断言守卫」的挡箭牌）**：①**消融动的是「触发条件」，不是守卫本身**——
 把守卫整个拆掉再看它不响，测的是「没有守卫时的样子」，那是另一个问题。
 ②**不是每条断言都有消融**：配了的那些挑的是「拿掉它系统会**静默地**错」那一类。
 一条没有消融的断言不因此就是没用的，它是**未被证明**的——这两件事不一样。
+③⚠️ **这条豁免覆盖的是「断言↔消融」这一对，不覆盖更宽的东西。**它说的是有些断言没配消融；
+它**不豁免一条断言都没有的守卫**——那种守卫压根进不到这一对里，也就无从被它豁免。
+2026-08-31 实测查出两条这样的守卫（G-7 的 `quota_ratio_update()`、G-8 的 `backup_roots()`），
+现已各自补控。**不要拿第②条去搪塞一条零断言的守卫**：那种读法会让「没有任何东西测它」
+与「这是写明的例外」变成同一句话。
+④⚠️ **条目被证明 ≠ 它点名的每个机制都被证明。**一条点名了四个函数的条目，只要其中
+**一个**会红它就算已证明，另外三个仍可能从未被执行。实测未被证明的那几个逐条列在
+「这句总括声称的分母」。
+
+### What the red-state claim covers / 这句总括声称的分母
+
+⚠️ **Written because the claim above is this repository's headline, and a headline claim
+whose denominator was never computed is the exact defect this repository exists to warn
+about.** Established 2026-08-31 by injecting a defect into each guard's own triggering
+condition (1–2 lines) and re-running the suite — not by reading code, not by counting how
+many times a function name appears in the tests.
+⚠️ **写下来是因为上面那句是本仓的招牌，而一句从没算过分母的招牌声称，正是本仓自己反复
+警告的那类缺陷。** 2026-08-31 用「往每条守卫自己的触发条件里定点注入 1–2 行反例、重跑套件」
+逐条实测得出——不是读代码推断，也不是数函数名在测试里出现过几次。
+
+**Proven: 9 of the 10 entries.** G-1, G-2, G-4, G-5, G-6, G-7, G-8, G-9, G-10 each have at
+least one shipped guard that went red on a named assertion when its triggering condition
+was broken.
+**已证明：十条里的九条。** G-1、G-2、G-4、G-5、G-6、G-7、G-8、G-9、G-10 都有至少一条出厂
+守卫，在触发条件被弄坏时让一条**点名的断言**变红。
+
+**Not proven, and why — read this as the claim's exclusion list, not as a to-do list:**
+
+| what / 什么 | status / 状态 |
+|---|---|
+| **G-3** as a whole | The executing half (the isolated-container liveness prober) **was not extracted** — see that entry's own ⚠️ Scope note. What ships is the evidence, the reasoning, and a read-only usage query that needs a live account and network to run at all. **There is no triggering condition to break here**, so G-3 is excluded from the numerator rather than counted as passing. / 执行的那一半（容器活体探测器）**没有抽取过来**，本仓没有可弄坏的触发条件 ⇒ G-3 不计入分子，也不算通过。 |
+| **G-4** · the parse-entry offset self-check | `quota_parse_reset_epoch()` accepts any `^[+-][0-9]{4}$`, and a bare zone abbreviation resolves to **`+0000`** — measured on the host: `TZ=XYZ date +%z` → `+0000`. So the self-check passes on exactly the input incident (a) was about. Removing it entirely leaves the suite fully green. G-4 is proven by its **other** mechanisms (`quota_fmt_ts`, `quota_iso_epoch`, the horizon clamp), not by this one. / 该自检把 `+0000` 判为合法，而裸缩写正好解析成 `+0000` ⇒ 它对事故 (a) 那个输入恒真；整条删掉套件依然全绿。G-4 是靠**另外三个**机制证明的，不是靠这一条。 |
+| **G-1** · either window-order branch **alone** | Disabling *one* of the two `quota_reset_later_window` branches in `quota_frame_stale()` leaves the suite green — the other branch catches the same fixtures. G-1 is proven at the **mechanism** level (disabling the shared primitive turns 3 assertions red), not per branch. / 单独关掉两条窗口序分支里的任何一条，套件仍全绿（另一条兜住了同一批夹具）。G-1 是在**机制**层证明的，不是逐分支。 |
+| **G-2** · the *empty* cache field | The shipped case covers a **stale** `usage_uuid`. The literal incident was a cache field that came back **empty** from a restore; widening the identity-missing predicate to include `-z "$usage_uuid"` stays green. / 出厂用例覆盖的是缓存**滞后**；事故原形是恢复后缓存**为空**，把它加进 identity-missing 判据套件仍全绿。 |
+| the range-C **allowance** in `tools/dod4-allow.local.txt` | The allowance is correctly literal-scoped (verified: a different local part at the same domain is still reported). But **no standing control covers it**, and `tools/dod4-scan.posctrl.sh` structurally cannot: it plants its own `*.local.txt` marker files into a throwaway clone and a gitignored allow file cannot travel there. Measured 2026-08-31 — with a deliberately domain-wide allowance in force, `dod4-scan.sh` reported **`CLEAN hits=0`** while `dod4-scan.posctrl.sh` still reported **`RANGE C-message fired OK`** and `POSCTRL_RESULT=PASS`. ⭐ That control proves the C **traversal** runs; it cannot prove the C **verdict** is unblinded. / 该豁免的射程确实是字面串（已复核：同域另一地址仍被报出）。但**没有常设控**，而且 `dod4-scan.posctrl.sh` 结构上也做不到：它往一次性 clone 里自己种 `*.local.txt` 标记，而已 gitignore 的 allow 文件根本进不了那份 clone。实测：把豁免故意放宽成整域之后，`dod4-scan.sh` 报 **`CLEAN hits=0`**，而 posctrl 仍报 **`RANGE C-message fired OK`**。⭐ 它证明的是 C 范围**走到了**，不是 C 范围的**结论没被蒙住**。 |
+
+⭐ **Two of these were found because the guard existed and was never executed**, which is
+the same shape as G-5's own lesson: a guard that has never been observed to go red tells
+you nothing when it is green. `quota_ratio_update()` (G-7) could be replaced by
+`{ return 0; }` and `backup_roots()` (G-8) could drop its old root, and **the suite, the
+ablations and `switch-selftest` all stayed green on both**. Controls for both were added on
+2026-08-31 and each was verified red against the real defect, not against a stand-in.
+⭐ **其中两条之所以被发现，是因为守卫存在但从未被执行过**——与 G-5 自己那条教训同形。
+`quota_ratio_update()`（G-7）可以整个换成 `{ return 0; }`，`backup_roots()`（G-8）可以
+把旧根丢掉，而**回归套件、消融表与 switch-selftest 三者对这两个改动全绿**。两条控已于
+2026-08-31 补上，且都拿**真实缺陷**验过会红，不是拿替身验的。
 
 🔴 **We have not found a comparable project shipping this as a publicly checkable
 artifact.** Note the wording: **"we have not found"**, not "nobody does". Incident-driven
