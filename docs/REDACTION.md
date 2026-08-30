@@ -277,20 +277,34 @@ checkable baseline rather than a shrug.
 ⇒ 范围 C 给出可核基线，而不是一句「知道了，是预期的」。
 
 - **What is in there** — every commit created under the Fleet commit convention carries a
-  `Co-Authored-By: … <noreply@anthropic.com>` trailer, and the published generic-email
-  pattern in `tools/dod4-patterns.example.txt` matches it. It is not an account-roster
-  address, not a credential, not an internal path.
-  **里面是什么**：按 Fleet 的 commit 惯例，每个 commit 都带一行
-  `Co-Authored-By: … <noreply@anthropic.com>` trailer，被已公开的通用邮箱模式命中。
+  `Co-Authored-By:` trailer whose value is a no-reply address at the assistant vendor's
+  domain, and the published generic-email pattern in `tools/dod4-patterns.example.txt`
+  matches it. It is not an account-roster address, not a credential, not an internal path.
+  ⚠️ The address itself is **deliberately not written out in this tracked file** — see the
+  episode note at the end of this section. The exact literal lives in
+  `tools/dod4-allow.local.txt`.
+  **里面是什么**：按 Fleet 的 commit 惯例，每个 commit 都带一行 `Co-Authored-By:` trailer，
+  它的值是助手厂商域名下的一个 no-reply 地址，被已公开的通用邮箱模式命中。
   它不是账号名册里的地址、不是凭据、不是内网路径。
+  ⚠️ 那个地址**刻意不写进本 tracked 文件**——理由见本节末的实撞记录；完整字面串在
+  `tools/dod4-allow.local.txt` 里。
 - **The baseline is a formula, not a number** — it is **one hit per commit carrying that
-  trailer**, so it grows by one with every new commit. Verify with
-  `git log --format=%B | grep -c 'Co-Authored-By'` and compare against the `C-message`
-  lines the scan prints. ⭐ A frozen number would be wrong by the next commit; that is
-  exactly how a baseline turns into noise.
+  trailer**, so it grows by one with every new commit. Verify with:
+  ```sh
+  git log --format=%B | grep -cE '^Co-Authored-By: .+<[^>]+@[^>]+>$'
+  ```
+  and compare against the `C-message` lines the scan prints. ⭐ A frozen number would be
+  wrong by the next commit; that is exactly how a baseline turns into noise.
+  ⚠️ **The anchoring is load-bearing.** A plain `grep -c 'Co-Authored-By'` also counts every
+  commit message that *mentions* the trailer in prose — measured here: 5 against 4 real
+  trailers, on a repo whose own commit messages discuss this very baseline. A recipe that
+  counts mentions instead of trailers produces a number that looks exact and is not.
   **基线是个式子，不是一个数**：**每个带该 trailer 的 commit 一条**，因此每提交一次就 +1。
-  核法：拿 `git log --format=%B | grep -c 'Co-Authored-By'` 与扫描打印的 `C-message` 行数
-  对照。⭐ 钉一个固定数字下一次提交就作废——基线正是这样变成噪音的。
+  用上面那条命令核，与扫描打印的 `C-message` 行数对照。⭐ 钉一个固定数字下一次提交就作废
+  ——基线正是这样变成噪音的。
+  ⚠️ **锚定是承重的**：裸 `grep -c 'Co-Authored-By'` 会把**散文里提到**该 trailer 的 commit
+  message 一起数进去——本仓实测 5 对 4（因为本仓的 commit message 自己在讨论这条基线）。
+  一条数「提及」而不是数「trailer」的配方，会给出一个看起来精确的错数。
 - **Locally it is excused; on a fresh clone it is not** — `tools/dod4-allow.local.txt`
   (gitignored) excuses **the exact literal address**, so the scan run here comes back to
   `A/C/D/E = 0`. A fresh clone has no such file and will report those C lines. ⚠️ That
@@ -321,6 +335,27 @@ checkable baseline rather than a shrug.
   ② 的复跑配方写在 allow 文件里。
   ⚠️ 第二个地址在这里只**描述**、不写出来，这不是讲究：把一个示例地址写进本文件，扫描器就会
   报**本文件**，排查者自己变成了事件源。（写这段时实测：初稿写全了，范围 A 当场从 0 变 1。）
+
+🩸 **一次实撞，记下来而不是抹掉（2026-08-31，写本节时）**：本节初稿把那个 trailer 地址
+**逐字**写进了这份 tracked 文件。**在本机扫不出来**——站点豁免正好把它挡掉了；
+只有在一份**没有站点文件的新 clone** 上重扫，才看见范围 **A 从 0 变成 2**。
+⚠️ ⇒ 上一条说的「站点豁免只可能让我们自己少看见，不会让别人少看见」，**方向是对的，但
+「只让我们自己少看见」正是最糟的那一半**：**我们**才是发布前做审计的人。
+⇒ 因此**发布前的那次 DoD-4 必须从一份不含 `tools/*.local.txt` 的新 clone 上跑**，
+本机那次只用于日常。字面串已从本文件删除；⚠️ 删除这个动作本身在**对象层**留下了 2 行
+（它们在 `6fb589f` 的 blob 里，非凭据、非名册地址，不追改）——这不是漏查，是删除动作生成的，
+与本节开头那条「删的是哪一层」同一形态。
+
+🩸 **A measured miss, recorded rather than tidied away (2026-08-31)**: the first draft of
+this section spelled that trailer address out in this tracked file. **It did not show up
+locally** — the site allowance covered it — and only a rescan from a **fresh clone with no
+site files** showed range **A going from 0 to 2**.
+⚠️ So "a site allowance can only blind us, never a third party" is true in direction and
+**wrong in comfort**: *we* are the ones who audit before publishing.
+⇒ The pre-publication DoD-4 run must be done from a clone without `tools/*.local.txt`.
+The literal has been removed here; ⚠️ that removal itself leaves 2 lines at the object
+layer (in `6fb589f`'s blob — not a credential, not a roster address, not chased), which is
+the same shape as this document's opening point about which layer a deletion removes.
 
 
 ⭐ **"What gets written from now on is clean" and "what already happened has been erased"
