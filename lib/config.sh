@@ -923,29 +923,69 @@ quota_tz_date() {
 #    而裸缩写恰恰就退化成 `+0000`（本机实测 `TZ=CST date +%z` → `+0000`）。
 #    ⇒ 那条判据对它本该拒绝的那个输入恒真；整条删掉，套件照样全绿。
 #
-# ⚠️ The criterion is the **form of the spec**, not the value of the offset. Requiring a
-#    particular offset (e.g. "+0800") would re-introduce exactly the hard-coded site fact
-#    this extraction removed (see docs/REDACTION.md, "What else was parameterised"), and
-#    would break the tool on every host outside that one zone. `+0000` is legitimate on a
-#    genuinely UTC host, and illegitimate as the *silent result of an unparsed
-#    abbreviation* — form is what separates the two, the number never can.
-# ⚠️ 判据是**规格的形态**，不是偏移量的数值。要求某个具体偏移（比如「必须 +0800」）等于
-#    把本次抽取刚去掉的站点事实又写死回来，且会让工具在该时区以外的每一台机器上失灵。
-#    `+0000` 在真正的 UTC 宿主上是合法的，在「裸缩写没被解析」时是非法的——
-#    能分开这两者的只有形态，数值永远分不开。
+# ⚠️ The criterion is **resolvability**, not the value of the offset and not the shape of
+#    the string. Two wrong criteria were tried first, and both are worth naming because
+#    each looked right:
+#    · **"the offset must be +0800"** — re-introduces the hard-coded site fact this
+#      extraction removed (docs/REDACTION.md, "What else was parameterised") and breaks the
+#      tool on every host outside that zone. Also wrong on its own terms: `Africa/Abidjan`
+#      is a real zone at `+0000`.
+#    · **"the shape must not be a bare abbreviation"** (this function, first version) —
+#      measured 2026-08-31 and rejected: it let `Etc`, `Z`, `Asia/Nowhere` and `Foo/Bar`
+#      through (all silently `+0000`), and it turned away **31 real zones** whose names are
+#      plain words with no slash — `Japan`, `EST`, `Iran`, `CET`, `Poland` … A name being
+#      well-formed says nothing about whether anything answers to it.
+#    ⭐ What actually distinguishes the incident from a legitimate `+0000` is neither the
+#      number nor the spelling: it is **whether the C library found a definition**. So ask
+#      that directly.
+# ⚠️ 判据是**可解析性**，不是偏移量的数值，也不是字符串的形态。前面试错过两个判据，
+#    两个都值得点名，因为它们都长得很有道理：
+#    · **「偏移量必须是 +0800」**——等于把本次抽取刚参数化掉的站点事实写死回来，并让工具在
+#      该时区以外每台机器上失灵；而且它本身就是错的：`Africa/Abidjan` 是真实时区，就是 `+0000`。
+#    · **「形态不能是裸缩写」**（本函数第一版）——2026-08-31 实测否决：它放过了 `Etc`、`Z`、
+#      `Asia/Nowhere`、`Foo/Bar`（全部静默 `+0000`），又误拒了 **31 个真实时区**——它们的名字
+#      就是不带斜杠的普通词：`Japan`、`EST`、`Iran`、`CET`、`Poland`……
+#      **名字长得规整，不说明有东西回应它。**
+#    ⭐ 真正能把事故与合法 `+0000` 分开的，既不是数值也不是拼写，而是**C 库到底有没有找到
+#      一份定义**。那就直接问这一问。
+#
+# ⚠️ This is also what makes the shell half keep the promise the docs already made for it:
+#    `docs/REQUIREMENTS.md` says a named zone with no `tzdata` must fail **immediately and
+#    by name**, and contrasts it with `TZ=<name> date`, which "silently falls back to UTC
+#    and reports success". Before this fix the shell half had that trap: with `TZDIR`
+#    pointing nowhere, `Asia/Shanghai` was accepted and every parsed time was eight hours
+#    off. It is now refused, and the two documented ways out still work — leave
+#    `QUOTA_FALLBACK_TZ` empty (needs no database), or give a POSIX spec such as `CST-8`.
+# ⚠️ 这也是 shell 这一半兑现文档已经替它许下的那个承诺的方式：`docs/REQUIREMENTS.md` 写着
+#    「给了区域名而机器上没有 tzdata 时必须立刻、点名失败」，并把它与 `TZ=<名> date`
+#    「静默回退 UTC 并报告成功」作对比。修之前 shell 这半正是后者：`TZDIR` 指向不存在的目录时
+#    `Asia/Shanghai` 照样放行，每个解析出来的时刻都差八小时。现在它被拒，而文档给的两条出路
+#    仍然可用——把 `QUOTA_FALLBACK_TZ` 留空（不需要时区库），或写 `CST-8` 这样的 POSIX 形态。
+#
+# ⚠️ Residual, stated rather than left to be discovered: this asks whether a definition
+#    **exists and is readable**, not whether glibc parsed it successfully. A corrupt zone
+#    file would still be accepted here and would still degrade to UTC. That case has no
+#    control and is not claimed to be covered.
+# ⚠️ 射程，写出来而不是留给人撞：它问的是「定义**存在且可读**」，不是「glibc 成功解析了它」。
+#    一份损坏的时区文件在这里仍会被接受、仍会降级成 UTC。这一格没有控，也不声称覆盖。
 quota_tz_spec_usable() {
-  local spec="${1-}"
+  local spec="${1-}" file
   # ① 连偏移量都取不到 → 失败（原判据保留，它仍拦得住 date 本身坏掉那一类）
   [[ "$(quota_tz_date "$spec" '+%z' 2>/dev/null)" =~ ^[+-][0-9]{4}$ ]] || return 1
-  # ② 空 = 本机时区，按定义就是宿主自己解析出来的那个偏移
+  # ② 空 = 本机时区。REQUIREMENTS 明说这条「不需要时区库」，所以它在无 tzdata 的机器上
+  #    仍然是那条正确的出路，不能因为下面查不到文件就把它一起拒掉。
   [[ -z "$spec" ]] && return 0
-  # ③ IANA 区域名（含 `/`）
-  [[ "$spec" == */* ]] && return 0
-  # ④ POSIX 形态，自带显式偏移，如 `CST-8`
+  spec="${spec#:}"                       # glibc 允许一个前导冒号
+  [[ -z "$spec" ]] && return 1
+  # ③ 不把它当路径用：绝对路径与 `..` 一律拒绝
+  case "$spec" in /*|*..*) return 1 ;; esac
+  # ④ POSIX 形态，自带显式偏移（`CST-8`、`UTC0`）——自描述，不需要时区库
   [[ "$spec" == *[0-9]* ]] && return 0
-  # ⑤ 真正的 UTC 别名——这里的 +0000 是**它的意思**，不是降级的结果
-  case "$spec" in UTC|GMT|UCT|Z|Zulu|Universal|Etc) return 0 ;; esac
-  # ⑥ 剩下的是纯字母裸缩写（CST / EDT / …）：glibc 静默当 UTC+0 —— 事故 (a) 本身
+  # ⑤ 其余一律要求时区库里真有这份定义。必须是**常规文件**：`Etc` 是目录，
+  #    而目录名不是时区（它正是第一版放过去的那一个）。
+  file="${TZDIR:-/usr/share/zoneinfo}/$spec"
+  [[ -f "$file" && -r "$file" ]] && return 0
+  # ⑥ 解析不到 ⇒ glibc 会静默给 UTC ⇒ 事故 (a)。判解析失败，不写进状态。
   return 1
 }
 

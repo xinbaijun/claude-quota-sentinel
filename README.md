@@ -1475,6 +1475,7 @@ was broken.
 | what / 什么 | status / 状态 |
 |---|---|
 | **G-3** as a whole | The executing half (the isolated-container liveness prober) **was not extracted** — see that entry's own ⚠️ Scope note. What ships is the evidence, the reasoning, and a read-only usage query that needs a live account and network to run at all. **There is no triggering condition to break here**, so G-3 is excluded from the numerator rather than counted as passing. / 执行的那一半（容器活体探测器）**没有抽取过来**，本仓没有可弄坏的触发条件 ⇒ G-3 不计入分子，也不算通过。 |
+| **G-4** · a zone file that exists but is **corrupt** | The fallback self-check now asks whether the C library can resolve the spec, and it answers that by requiring a readable zone definition to exist. It does **not** verify that glibc parsed it successfully, so a corrupt zone file is still accepted and would still degrade to UTC. The rest of that self-check *is* proven (bare abbreviations, non-existent zones, a directory name, and a host with no `tzdata` all go red on named assertions) — **this one sliver is not**, and it is listed rather than folded into the fixed part. / 该自检现在问的是「C 库解析不解析得了」，而它是用「存在且可读的时区定义」来回答的。它**不**验证 glibc 真的解析成功 ⇒ 一份**损坏**的时区文件仍会被接受、仍会降级成 UTC。这条自检的其余部分已被证明（裸缩写、不存在的时区、目录名、无 `tzdata` 的宿主，四种都会让点名断言变红），**唯独这一格没有**，所以单列出来，不并进已修的那部分。 |
 | **G-1** · either window-order branch **alone** | Disabling *one* of the two `quota_reset_later_window` branches in `quota_frame_stale()` leaves the suite green — the other branch catches the same fixtures. G-1 is proven at the **mechanism** level (disabling the shared primitive turns 3 assertions red), not per branch. / 单独关掉两条窗口序分支里的任何一条，套件仍全绿（另一条兜住了同一批夹具）。G-1 是在**机制**层证明的，不是逐分支。 |
 | **G-2** · the *empty* cache field | The shipped case covers a **stale** `usage_uuid`. The literal incident was a cache field that came back **empty** from a restore; widening the identity-missing predicate to include `-z "$usage_uuid"` stays green. / 出厂用例覆盖的是缓存**滞后**；事故原形是恢复后缓存**为空**，把它加进 identity-missing 判据套件仍全绿。 |
 | the range-C **allowance** in `tools/dod4-allow.local.txt` | The allowance is correctly literal-scoped (verified: a different local part at the same domain is still reported). But **no standing control covers it**, and `tools/dod4-scan.posctrl.sh` structurally cannot: it plants its own `*.local.txt` marker files into a throwaway clone and a gitignored allow file cannot travel there. Measured 2026-08-31 — with a deliberately domain-wide allowance in force, `dod4-scan.sh` reported **`CLEAN hits=0`** while `dod4-scan.posctrl.sh` still reported **`RANGE C-message fired OK`** and `POSCTRL_RESULT=PASS`. ⭐ That control proves the C **traversal** runs; it cannot prove the C **verdict** is unblinded. / 该豁免的射程确实是字面串（已复核：同域另一地址仍被报出）。但**没有常设控**，而且 `dod4-scan.posctrl.sh` 结构上也做不到：它往一次性 clone 里自己种 `*.local.txt` 标记，而已 gitignore 的 allow 文件根本进不了那份 clone。实测：把豁免故意放宽成整域之后，`dod4-scan.sh` 报 **`CLEAN hits=0`**，而 posctrl 仍报 **`RANGE C-message fired OK`**。⭐ 它证明的是 C 范围**走到了**，不是 C 范围的**结论没被蒙住**。 |
@@ -1492,9 +1493,19 @@ because two of the three failed in ways worth telling apart:
   +%z` → `+0000` on this host). It ran constantly and could not fail. ⭐ **This is the
   harder of the two to notice**: a guard that never runs at least leaves a coverage hole
   someone might count, whereas an always-true guard reports success forever. The predicate
-  now tests the **form** of the spec (`quota_tz_spec_usable()` in `lib/config.sh`), never
-  the numeric offset — requiring a particular offset would re-introduce the hard-coded site
-  fact this extraction removed.
+  now asks whether the C library **can actually resolve the spec**
+  (`quota_tz_spec_usable()` in `lib/config.sh`), never the numeric offset and never the
+  spelling.
+  🩸 **The first replacement for it was itself wrong, and that is worth recording rather
+  than tidying away.** It tested the *shape* of the spec — "a bare abbreviation is
+  suspicious" — which let `Etc` (a directory), `Z` (no such zone), `Asia/Nowhere` and
+  `Foo/Bar` straight through at a silent `+0000`, and turned away **31 real zones** whose
+  names are ordinary words with no slash (`Japan`, `EST`, `Iran`, `CET`, `Poland`…).
+  ⭐ **A name being well-formed says nothing about whether anything answers to it** — and
+  the control written alongside it did not catch either half, because its five accept-side
+  samples were all specs the *old* predicate already accepted: **none of them landed on the
+  boundary the new rule had just drawn**. A control whose samples do not straddle the new
+  boundary is not testing the change; it is re-testing the behaviour that did not change.
 
 Each of the three now has a control that was **verified red against the real defect, not
 against a stand-in**.
@@ -1506,9 +1517,15 @@ against a stand-in**.
 - **每次解析都执行，但恒真**（1 条）：兜底偏移自检判的是 `%z =~ ^[+-][0-9]{4}$`，
   它**接受 `+0000`**——而裸缩写恰恰就降级成 `+0000`（本机 `TZ=CST date +%z` → `+0000`）。
   它一直在跑，却不可能失败。⭐ **这一种比前一种更难发现**：不跑的守卫至少留下一个能被
-  数出来的覆盖空洞，而恒真的守卫会永远报成功。现在的判据看的是规格的**形态**
-  （`lib/config.sh :: quota_tz_spec_usable()`），不看偏移量数值——要求某个具体偏移
-  等于把本次抽取刚去掉的站点事实又写死回来。
+  数出来的覆盖空洞，而恒真的守卫会永远报成功。现在的判据问的是**C 库到底解析不解析得了
+  这个规格**（`lib/config.sh :: quota_tz_spec_usable()`），既不看偏移量数值也不看拼写。
+  🩸 **它的第一版替代品本身也是错的，这一点记下来而不是抹掉。** 那一版判的是规格的
+  **形态**——「裸缩写可疑」——于是放过了 `Etc`（目录）、`Z`（库里没有）、`Asia/Nowhere`、
+  `Foo/Bar`（四个全部静默 `+0000`），又误拒了 **31 个真实时区**——它们的名字就是不带斜杠的
+  普通词（`Japan`、`EST`、`Iran`、`CET`、`Poland`……）。
+  ⭐ **名字长得规整，不说明有东西回应它**；而当时配的那条控两侧都没抓到，因为它接受侧的
+  五个样本**在旧判据下本来就全部被接受**——**没有一个落在新规则刚划出的边界上**。
+  一条样本不跨越新边界的控，测的不是这次改动，而是没变的那部分行为。
 
 三条现在各自都有控，且都是拿**真实缺陷**验过会红，不是拿替身验的。
 

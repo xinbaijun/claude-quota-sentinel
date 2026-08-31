@@ -452,21 +452,46 @@ echo "── 兜底时区自检：裸缩写必须判解析失败，不许静默�
 # ⚠️ 判据是**规格的形态**不是偏移量的数值：写死「必须 +0800」会把本次抽取刚去掉的站点
 #    事实又写回来，且让工具在别的时区全线失灵。`+0000` 在真 UTC 宿主上合法，
 #    在「裸缩写没被解析」时非法——只有形态分得开这两者。
-for _tzs in "" "Asia/Shanghai" "CST-8" "UTC" "GMT"; do
+# ⚠️ 2026-08-31 review 返工：上一版这块的接受侧喂的是 ""/Asia\/Shanghai/CST-8/UTC/GMT，
+#    **五个样本没有一个落在新判据划出的边界上**——它们在改判据之前也全都被接受。
+#    ⭐ 于是那条控名义上双向、实质上只是在复验旧行为：新规则把 31 个真实时区
+#    （`Japan`/`EST`/`Iran`/`CET`/`Poland`…）误拒了，而控一路全绿。
+#    **加了新规则，样本必须落在新边界的两侧**，否则控测不到你刚改的那件事。
+# 接受侧：前四个是旧样本（防回归），后四个专打新边界——纯字母、无斜杠、无数字，
+# 在「形态判据」下会被误拒，在「可解析性判据」下必须放行。Africa/Abidjan 是真实时区
+# 且偏移就是 +0000，专门用来钉死「不许拿偏移量为零当拒绝理由」。
+for _tzs in "" "Asia/Shanghai" "CST-8" "UTC" "Japan" "EST" "Iran" "Africa/Abidjan"; do
   if quota_tz_spec_usable "$_tzs"; then
-    pass "可用的 TZ 规格被接受：${_tzs:-<空=本机时区>}"
+    pass "可解析的 TZ 规格被接受：${_tzs:-<空=本机时区>}（%z=$(quota_tz_date "$_tzs" '+%z' 2>/dev/null)）"
   else
-    fail "合法的 TZ 规格被误拒：${_tzs:-<空=本机时区>}（%z=$(quota_tz_date "$_tzs" '+%z' 2>/dev/null)）"
+    fail "可解析的 TZ 规格被误拒：${_tzs:-<空=本机时区>}（%z=$(quota_tz_date "$_tzs" '+%z' 2>/dev/null)）——时区库里有这份定义"
   fi
 done
-for _tzs in CST EDT PST XYZ; do
+# 拒绝侧：CST/EDT/PST/XYZ 是裸缩写；Asia/Nowhere 与 Foo/Bar 拼写规整但**没有任何东西回应**；
+# Etc 是**目录**不是时区；Z 时区库里根本没有。后四个是上一版实测放过去的那几个。
+for _tzs in CST EDT PST XYZ Asia/Nowhere Foo/Bar Etc Z; do
   if quota_tz_spec_usable "$_tzs"; then
-    fail "裸缩写 $_tzs 被当成可用时区（glibc 把它静默当 UTC+0，正是事故 (a)）"
+    fail "解析不到的 TZ 规格被当成可用时区：$_tzs（%z=$(quota_tz_date "$_tzs" '+%z' 2>/dev/null)，glibc 静默给 UTC —— 事故 (a)）"
   else
-    pass "裸缩写 $_tzs 被拒（它的 %z 是 +0000，那是降级不是时区）"
+    pass "解析不到的 TZ 规格被拒：$_tzs（时区库里没有这份定义）"
   fi
 done
 unset _tzs
+# ⭐ 无时区库那一格：docs/REQUIREMENTS.md 承诺「给了区域名而机器上没有 tzdata 时必须立刻、
+#    点名失败」，并把它与 `TZ=<名> date`「静默回退 UTC 并报告成功」作对比。返工前 shell
+#    这一半正是后者（TZDIR 指向不存在的目录时 Asia/Shanghai 照样放行，每个时刻差八小时）
+#    ⇒ 那是**一条写在文档里、而实现没有兑现的承诺**。这条控就是钉住它。
+if (TZDIR=/nonexistent-quota-sentinel-tzdir; quota_tz_spec_usable "Asia/Shanghai"); then
+  fail "机器上没有时区库时区域名仍被接受（承诺是立刻点名失败，实际会静默按 UTC 渲染，差一整个偏移量）"
+else
+  pass "机器上没有时区库时区域名被拒（兑现 REQUIREMENTS 里那条「立刻、点名失败」）"
+fi
+# 同一环境下，文档给的两条出路必须仍然可用，否则这条守卫就把人堵死了。
+if (TZDIR=/nonexistent-quota-sentinel-tzdir; quota_tz_spec_usable "" && quota_tz_spec_usable "CST-8"); then
+  pass "无时区库时两条出路仍可用：留空（本机时区）与 POSIX 形态 CST-8"
+else
+  fail "无时区库时把文档给的出路也堵死了（留空 / CST-8 至少一条被拒）"
+fi
 # 端到端：契约说的是「不写进状态」，所以最终判据打在解析结果上，不只打在谓词上。
 _tz_saved="$QUOTA_FALLBACK_TZ"
 QUOTA_FALLBACK_TZ=CST
