@@ -259,6 +259,17 @@ ablate p5-timezone-offset \
     '[[ -n "$tz" ]] || tz=$(date +%Z)' \
     '[[ -n "$tz" ]] || tz=CST-8'
 
+# 兜底时区自检：把 quota_tz_spec_usable 退回 2026-08-31 之前那版「只要能取到 %z 就放行」，
+# 也就是让 `+0000` 重新算合法值。那正是裸缩写的降级结果 ⇒ 事故 (a) 原样复活。
+# ⚠️ 这条消融动的是**触发条件**（哪些规格算可用），不是把守卫整个拆掉：函数仍在、仍被调用、
+#    仍会对取不到偏移量的情况返回失败——只是恢复了那条恒真的判据。
+ablate tz-spec-bare-abbrev \
+  "兜底 TZ 是裸缩写时必须判解析失败，不许静默当 UTC" --fast \
+  "被当成可用时区" \
+  m_sed lib/config.sh \
+    '  [[ -z "$spec" ]] && return 0' \
+    '  return 0'
+
 # ⚠️ 上面那条消融动的是**冻结对照组**，证明的是「对照组会复现 8 小时偏差」。它不覆盖
 #    出厂渲染函数 `lib/state.sh :: quota_fmt_ts()`——2026-08-31 实测：把 quota_fmt_ts
 #    改回 `TZ=$QUOTA_TZ_LABEL date -d @ts`（事故 (a) 的写法，本机把 08:26 渲染成

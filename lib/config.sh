@@ -906,6 +906,49 @@ quota_tz_date() {
   if [[ -n "$tz" ]]; then TZ="$tz" date "$@"; else date "$@"; fi
 }
 
+# quota_tz_spec_usable — is this TZ spec one glibc actually understands?
+#
+# 🔴 Fixed 2026-08-31. The fallback paths in quota_parse_reset_epoch() and
+#    quota_panel_reset_epoch() documented their contract as: *"self-check that %z parses
+#    as an offset; a value that silently degraded to UTC must never be written to state."*
+#    The implementation was `[[ $(… '+%z') =~ ^[+-][0-9]{4}$ ]]`, which **accepts
+#    `+0000`** — and `+0000` is exactly what a bare abbreviation degrades to. Measured on
+#    the host: `TZ=XYZ date +%z` → `+0000`, `TZ=CST date +%z` → `+0000`. So the check was
+#    true for precisely the input it existed to reject, and deleting it outright left the
+#    whole suite green.
+#    ⭐ That is the same shape this repository keeps writing down: a guard that is
+#    **always true** and a guard that is **correct** produce identical output.
+# 🔴 2026-08-31 修。这两条兜底路径的契约白纸黑字写着「自检 %z 能解析成偏移量，绝不把静默
+#    回退 UTC 的值写进状态」，而实现是 `=~ ^[+-][0-9]{4}$` ——它**接受 `+0000`**，
+#    而裸缩写恰恰就退化成 `+0000`（本机实测 `TZ=CST date +%z` → `+0000`）。
+#    ⇒ 那条判据对它本该拒绝的那个输入恒真；整条删掉，套件照样全绿。
+#
+# ⚠️ The criterion is the **form of the spec**, not the value of the offset. Requiring a
+#    particular offset (e.g. "+0800") would re-introduce exactly the hard-coded site fact
+#    this extraction removed (see docs/REDACTION.md, "What else was parameterised"), and
+#    would break the tool on every host outside that one zone. `+0000` is legitimate on a
+#    genuinely UTC host, and illegitimate as the *silent result of an unparsed
+#    abbreviation* — form is what separates the two, the number never can.
+# ⚠️ 判据是**规格的形态**，不是偏移量的数值。要求某个具体偏移（比如「必须 +0800」）等于
+#    把本次抽取刚去掉的站点事实又写死回来，且会让工具在该时区以外的每一台机器上失灵。
+#    `+0000` 在真正的 UTC 宿主上是合法的，在「裸缩写没被解析」时是非法的——
+#    能分开这两者的只有形态，数值永远分不开。
+quota_tz_spec_usable() {
+  local spec="${1-}"
+  # ① 连偏移量都取不到 → 失败（原判据保留，它仍拦得住 date 本身坏掉那一类）
+  [[ "$(quota_tz_date "$spec" '+%z' 2>/dev/null)" =~ ^[+-][0-9]{4}$ ]] || return 1
+  # ② 空 = 本机时区，按定义就是宿主自己解析出来的那个偏移
+  [[ -z "$spec" ]] && return 0
+  # ③ IANA 区域名（含 `/`）
+  [[ "$spec" == */* ]] && return 0
+  # ④ POSIX 形态，自带显式偏移，如 `CST-8`
+  [[ "$spec" == *[0-9]* ]] && return 0
+  # ⑤ 真正的 UTC 别名——这里的 +0000 是**它的意思**，不是降级的结果
+  case "$spec" in UTC|GMT|UCT|Z|Zulu|Universal|Etc) return 0 ;; esac
+  # ⑥ 剩下的是纯字母裸缩写（CST / EDT / …）：glibc 静默当 UTC+0 —— 事故 (a) 本身
+  return 1
+}
+
 # QUOTA_TIME_NORMALIZE_JQ — rebuilds ._times_readable on every state write.
 #
 # Every timestamp in the ledger is stored as epoch seconds. Epoch itself is

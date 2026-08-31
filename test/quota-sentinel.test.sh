@@ -443,6 +443,41 @@ else
   fail "新判据解析错误（got=$new_hm，期望 15:10）"
 fi
 
+echo "── 兜底时区自检：裸缩写必须判解析失败，不许静默当成 UTC ──"
+# 这条守卫的契约（写在 lib/detect.sh 的函数抬头）是：「自检 %z 能解析成偏移量，
+# **绝不把静默回退 UTC 的值写进状态**」。而 2026-08-31 之前的实现是
+# `[[ $(… '+%z') =~ ^[+-][0-9]{4}$ ]]`——它**接受 `+0000`**，而裸缩写恰恰退化成 `+0000`
+# （本机实测 `TZ=CST date +%z` → `+0000`）⇒ 那条判据对它本该拒绝的那个输入**恒真**，
+# 整条删掉套件照样全绿。⭐ 与 G-8 同一形状：纸面上存在、任何机器上恒绿。
+# ⚠️ 判据是**规格的形态**不是偏移量的数值：写死「必须 +0800」会把本次抽取刚去掉的站点
+#    事实又写回来，且让工具在别的时区全线失灵。`+0000` 在真 UTC 宿主上合法，
+#    在「裸缩写没被解析」时非法——只有形态分得开这两者。
+for _tzs in "" "Asia/Shanghai" "CST-8" "UTC" "GMT"; do
+  if quota_tz_spec_usable "$_tzs"; then
+    pass "可用的 TZ 规格被接受：${_tzs:-<空=本机时区>}"
+  else
+    fail "合法的 TZ 规格被误拒：${_tzs:-<空=本机时区>}（%z=$(quota_tz_date "$_tzs" '+%z' 2>/dev/null)）"
+  fi
+done
+for _tzs in CST EDT PST XYZ; do
+  if quota_tz_spec_usable "$_tzs"; then
+    fail "裸缩写 $_tzs 被当成可用时区（glibc 把它静默当 UTC+0，正是事故 (a)）"
+  else
+    pass "裸缩写 $_tzs 被拒（它的 %z 是 +0000，那是降级不是时区）"
+  fi
+done
+unset _tzs
+# 端到端：契约说的是「不写进状态」，所以最终判据打在解析结果上，不只打在谓词上。
+_tz_saved="$QUOTA_FALLBACK_TZ"
+QUOTA_FALLBACK_TZ=CST
+if _bad_epoch=$(quota_parse_reset_epoch "$(read_fx reset-no-timezone.txt)"); then
+  fail "QUOTA_FALLBACK_TZ=CST 时仍解析出 epoch（本地 $(date -d "@$_bad_epoch" '+%H:%M')，真值 15:10）——静默偏掉一个偏移量的值进了状态"
+else
+  pass "QUOTA_FALLBACK_TZ 是裸缩写时整帧判解析失败（旧实现会在这里返回 23:10）"
+fi
+QUOTA_FALLBACK_TZ="$_tz_saved"
+unset _tz_saved _bad_epoch
+
 echo "── reset 时间：带时区时新旧应一致（无回归）──"
 o=$(legacy_call parse_usage_reset_epoch "$(read_fx reset-with-timezone.txt)" || echo "")
 n=$(quota_parse_reset_epoch "$(read_fx reset-with-timezone.txt)" || echo "")

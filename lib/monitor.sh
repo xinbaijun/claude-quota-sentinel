@@ -725,7 +725,7 @@ quota_panel_reset_epoch() {
     # 文本里没有 IANA 区域名 → 退到 QUOTA_FALLBACK_TZ（留空 = 本机时区）。
     # 自检必须能解析出偏移量；解析不出就判失败，绝不把静默回退 UTC 的值写进状态。
     tz="$QUOTA_FALLBACK_TZ"
-    [[ "$(quota_tz_date "$tz" '+%z' 2>/dev/null)" =~ ^[+-][0-9]{4}$ ]] || return 1
+    quota_tz_spec_usable "$tz" || return 1
   fi
   timepart=$(printf '%s' "$line" | grep -oE '[0-9]{1,2}(:[0-9]{2})?[[:space:]]?(am|pm)' | head -1)
   [[ -z "$timepart" ]] && return 1

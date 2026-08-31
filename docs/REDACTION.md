@@ -6,13 +6,27 @@ that it stayed removed.
 本仓的代码抽取自一个跑在真实 Claude 账号上的私有代码库。本文件记录删掉了什么、怎么删的、
 以及你怎么核实它一直没回来。
 
-> 🔴🔴 **THIS REPOSITORY MUST NEVER BE MADE PUBLIC.** Its git objects contain real
-> people's names. This is known, accepted, and **will not be processed further** — see
-> [Never public](#never-public--本仓永不转-public) below before you consider changing its
-> visibility, and before you assume a history rewrite would fix it.
-> 🔴🔴 **本仓永远不得转为 public。** 它的 git 对象里含真实人名。此事已知、已接受、
-> **不再处置**——在你考虑改仓可见性之前，也在你以为「重写一下历史就行」之前，
-> 先读下面的「本仓永不转 public」。
+> ✅ **SUPERSEDED 2026-08-31 — this repository MAY be made public, and a public release
+> ships from THIS repository.** A 🔴🔴 banner stood here saying it must never be. That was
+> the owner's 2026-08-26 line; on 2026-08-31 the owner was shown the measured contents and
+> relaxed it, in his own words: *「这些信息无所谓，接着用这个仓推进」*. **The old
+> instruction is struck out in place rather than quietly replaced**, because an expired
+> imperative does not fail loudly — it just keeps something from happening while everyone
+> assumes it is still queued.
+> ⚠️ **The finding underneath did not change and must not be read as retracted**: real
+> given names are still in this repository's **git objects** — 114 lines, range B, in
+> historical versions of `test/quota-sentinel.test.sh` — and they are still **not
+> removable by editing the working tree**. What was relaxed is the **disposition**, not the
+> **measurement**. Both are stated separately in
+> [Real names in the git objects](#real-names-in-the-git-objects--git-对象里的真实人名).
+> ✅ **2026-08-31 作废——本仓可以转 public，且公开发布就从本仓推出。** 这里原本立着一条
+> 🔴🔴「本仓永远不得转为 public」。那是仓主 2026-08-26 定的线；2026-08-31 仓主看过实测内容
+> 之后放宽了它，原话：**「这些信息无所谓，接着用这个仓推进」**。
+> **旧指令是就地划掉、不是被悄悄换掉**——一条过期的祈使句不会报错，它只会让该发生的事
+> 一直不发生，而等的人以为自己还在正常排队。
+> ⚠️ **它底下那条发现没有变，也不得被读成撤回**：真实名字仍在本仓的 **git 对象**里
+> （范围 B，114 行，位于 `test/quota-sentinel.test.sh` 的历史版本），**且靠改工作树仍然
+> 消不掉**。放宽的是**处置决定**，不是**测量结果**。
 
 ## The rule / 规则
 
@@ -119,6 +133,36 @@ in the pack, where no amount of grepping the checkout will ever find it.
 ⚠️ **grep 工作树不等于这项检查。**它只覆盖五个范围里的一个，对另外四个结构性全盲。
 开源前最经典的那种泄漏（提交了、发现了、下个 commit 删掉）已经从工作树消失，却仍躺在
 对象库里，再怎么 grep 检出目录都永远看不见它。
+
+### Both scopes are mandatory / 两个口径都必须跑
+
+🔴 **Before publishing, run the scan twice — once here, once from a clone with no
+`tools/*.local.txt` — and report the two results separately.** Neither is the stricter run;
+they use **different pattern sets** and each is blind to what the other is for.
+
+| scope / 口径 | patterns | the only question it can answer / 它是唯一能回答的那一问 |
+|---|---|---|
+| **here**, with the site table / **本机**，带站点模式表 | `site` | *Are the site-private tokens — the real names, internal hostnames, the private repo name — still where we think they are?* Measured here: **114** range-B lines. A fresh clone reports **0** of them, because it has no table to match them with. / 站点私有 token（真实人名、内部主机名、私有仓名）还在不在我们以为的位置。本机实测范围 B **114** 行；新 clone 报 **0**，因为它没有那张表。 |
+| **a fresh clone**, no `*.local.txt` / **新 clone**，无 `*.local.txt` | `example-only` | *Has a site allowance blinded us to something a third party would see?* This is the only scope in which `tools/dod4-allow.local.txt` is absent, and it is how the trailer-address miss below was caught — **range A went 0 → 2** on the clone while this machine said 0. / 站点豁免有没有把我们自己扫瞎、而第三方看得见。这是唯一没有 allow 文件的口径，下面那次 trailer 地址实撞正是这样查出来的：本机报 0，clone 上范围 A 从 0 变 2。 |
+
+⭐ **Neither scope covers the other, and the two counts must not be merged into one
+number.** "The scan was clean" is not a sentence this check can produce; "clean under
+`patterns=site`" and "clean under `patterns=example-only`" are two findings, and publishing
+requires looking at both.
+⚠️ **A fresh clone is not "the stricter scan."** It is tempting to think dropping the local
+files can only *add* findings — that is true of the **allow** file and false of the
+**pattern** files, and the pattern files are where the real names live. A rule that said
+"run it from a fresh clone instead" would have quietly stopped anyone from ever looking at
+the 114 lines again.
+
+🔴 **发布前把扫描跑两遍——本机一遍、无 `tools/*.local.txt` 的新 clone 一遍——并把两个结果
+分开报。** 两者都不是「更严格的那一次」：它们用的是**不同的模式集**，各自对对方要查的东西
+结构性全盲。
+⭐ **两个口径互不覆盖，两个数不许合并成一个。** 「扫描是干净的」这句话本检查产不出来；
+「`patterns=site` 下干净」与「`patterns=example-only` 下干净」是两条结论，发布要求两条都看。
+⚠️ **新 clone 不是「更严格的扫描」。**「少了本地文件只会多报、不会少报」这个直觉对 **allow**
+文件成立、对 **pattern** 文件不成立——而真实人名恰恰在 pattern 文件那一侧。一条写成
+「改从新 clone 跑」的规则，会悄悄让此后再没有人看过那 114 行。
 
 ### Which local file does a pattern go in? / 一个模式该写进哪个本地文件？
 
@@ -245,13 +289,55 @@ answer down** rather than leaving the scanner's silence to speak for it.
 以及一条把某个名字举例出来、等于披露它在内部命令名单上的注释），两处均已修。
 **正则永远抓不到它们。**
 
-### Never public / 本仓永不转 public
+### Real names in the git objects / git 对象里的真实人名
+
+> ⚠️ **This section was titled "Never public / 本仓永不转 public" until 2026-08-31.** The
+> title is part of what people acted on, so it was changed rather than left standing above
+> a decision that had reversed. The measurements in it are unchanged.
+> ⚠️ **本节标题在 2026-08-31 之前是「Never public / 本仓永不转 public」。** 标题本身就是
+> 别人据以行动的东西，所以它跟着改了，而不是让它继续立在一个已经反转的决定上方。
+> 节内的测量值一字未动。
 
 **Real names are in this repository's git objects.** / **本仓的 git 对象里有真实人名。**
 
-⚠️ **Status: present, accepted, not processed, and it changes what this repository may be
-used for.** This is a **standing constraint on whoever reads this next**, not a note about
-one milestone.
+⚠️ **Status: present, accepted, not processed — and since 2026-08-31 it no longer
+constrains what this repository may be used for.** Until then this paragraph read *"it
+changes what this repository may be used for"* and called itself **a standing constraint on
+whoever reads this next**. The owner lifted that constraint on 2026-08-31 after being shown
+what the 114 lines actually contain (see the banner at the top of this file).
+⭐ **The names are still there; they are simply no longer a reason to withhold the
+repository.** ⇒ Read everything below as a **finding**, not as a **restriction**.
+⚠️ **状态：存在、已接受、不再处置——且自 2026-08-31 起，它不再限制本仓可以被用来做什么。**
+在那之前本段写的是「**它改变了本仓可以被用来做什么**」，并自称「对下一个读到它的人的
+**长期约束**」。2026-08-31 仓主在看过那 114 行的实际内容后解除了该约束（见本文件顶部横幅）。
+⭐ **名字仍然在那里，只是它不再构成扣住本仓不发布的理由。**
+⇒ 下面的内容请当作**发现**读，不要当作**限制**读。
+
+**What those 114 lines actually are, since that is what the decision turned on** — four
+given names, appearing as short fixture identifiers and in incident notes recording quota
+readings. **No deliverable address is among them**: the only complete addresses in this
+repository are `*@example.com` (RFC 2606 documentation domain) and the vendor's public
+`noreply@` co-author address.
+**Counted 2026-08-31 from `tools/dod4-scan.sh`'s own output**: exactly **4** patterns fire,
+with **42 / 36 / 24 / 18** occurrences — **120 occurrences across 114 lines**.
+⚠️ Those two totals are stated together on purpose: 120 ≠ 114 because some lines carry two
+names, and a reader who adds the four numbers and gets 120 should not have to wonder which
+of the two figures is wrong. **Neither is; they count different things.**
+**2026-08-31 用 `tools/dod4-scan.sh` 自己的输出数出来的**：恰好 **4** 条模式命中，
+各 **42 / 36 / 24 / 18** 次——**114 行里共 120 处**。
+⚠️ 两个合计有意写在一起：120 ≠ 114 是因为有些行同时含两个名字；把四个数加起来得到 120 的
+读者，不该还要去猜这两个数哪个错了。**两个都没错，它们数的是不同的东西。**
+⚠️ The four names are **deliberately not written out here**, for the same reason the
+trailer address is not — the site pattern table matches them, so spelling them out in this
+file would make the scanner report **this file**, and the person documenting the decision
+would become the event source. (That is not hypothetical; it is the episode recorded at the
+end of the range-C section below.)
+**那 114 行到底是什么，因为决定正是基于这个**：四个名字（分别出现 42 / 36 / 24 / 18 次），
+以短夹具标识符与记录额度读数的事故注释两种形态出现。**其中没有任何可投递的地址**——
+本仓里完整的地址只有 `*@example.com`（RFC 2606 文档域名）与厂商公开的 `noreply@` 协作者地址。
+⚠️ 那四个名字**刻意不在此逐字写出**，理由与 trailer 地址那条相同：站点模式表会命中它们，
+写出来会让扫描器报**本文件**，记录这个决定的人自己变成事件源（这不是假设，见下面范围 C
+小节末尾那次实撞）。
 
 Real people's names — the short forms of account-roster aliases — are in this
 repository's git objects. They were carried over verbatim from the baseline when the test
@@ -363,8 +449,13 @@ checkable baseline rather than a shrug.
 只有在一份**没有站点文件的新 clone** 上重扫，才看见范围 **A 从 0 变成 2**。
 ⚠️ ⇒ 上一条说的「站点豁免只可能让我们自己少看见，不会让别人少看见」，**方向是对的，但
 「只让我们自己少看见」正是最糟的那一半**：**我们**才是发布前做审计的人。
-⇒ 因此**发布前的那次 DoD-4 必须从一份不含 `tools/*.local.txt` 的新 clone 上跑**，
-本机那次只用于日常。字面串已从本文件删除；⚠️ 删除这个动作本身在**对象层**留下了 2 行
+⇒ 因此**发布前的 DoD-4 必须包含一次从不含 `tools/*.local.txt` 的新 clone 上跑的扫描**。
+⚠️ **2026-08-31 订正——是「必须包含」，不是「必须只从新 clone 跑」。** 本行原文是
+「发布前的那次 DoD-4 必须从一份不含站点文件的新 clone 上跑，本机那次只用于日常」，
+那句是错的，而且错的方向比它想防的那次漏还贵：**新 clone 不是更严格的扫描，它是另一套模式**
+——它没有站点模式表，那 114 行真实人名在它眼里根本不存在。
+⇒ **两个口径都必须跑，见「两个口径都必须跑」一节。**
+字面串已从本文件删除；⚠️ 删除这个动作本身在**对象层**留下了 2 行
 （它们在 `6fb589f` 的 blob 里，非凭据、非名册地址，不追改）——这不是漏查，是删除动作生成的，
 与本节开头那条「删的是哪一层」同一形态。
 
@@ -374,7 +465,13 @@ locally** — the site allowance covered it — and only a rescan from a **fresh
 site files** showed range **A going from 0 to 2**.
 ⚠️ So "a site allowance can only blind us, never a third party" is true in direction and
 **wrong in comfort**: *we* are the ones who audit before publishing.
-⇒ The pre-publication DoD-4 run must be done from a clone without `tools/*.local.txt`.
+⇒ The pre-publication DoD-4 run **must include** a clone without `tools/*.local.txt`.
+⚠️ **Corrected 2026-08-31 — it must include, not consist of.** This line first read *"the
+pre-publication run must be done from a clone without site files"*, which is wrong in a way
+that would have cost more than the miss it was written for: the fresh clone is **not the
+stricter scan, it is a different pattern set**. Having no site pattern table, it cannot see
+the 114 real-name lines at all. ⇒ **Both scopes are mandatory; see
+[Both scopes are mandatory](#both-scopes-are-mandatory--两个口径都必须跑).**
 The literal has been removed here; ⚠️ that removal itself leaves 2 lines at the object
 layer (in `6fb589f`'s blob — not a credential, not a roster address, not chased), which is
 the same shape as this document's opening point about which layer a deletion removes.
@@ -392,26 +489,41 @@ and false at the *object* layer. ⚠️ Rewriting **again** does not help either
 commits are already unreachable, and being unreachable is precisely not the problem —
 being *still served* is.
 
-**Therefore the disposition is:**
+**The disposition, as of 2026-08-31:**
 
-1. **This repository is an internal working repository and is never made public.**
-2. **Any public release ships from a NEW repository, with a history that is clean from its
-   very first commit** — not from a rewrite of this one.
+1. **This repository may be made public.**
+2. **A public release ships from THIS repository** — no new repository, no rewrite.
 
-**Why that is the cheaper path**, which is worth writing down because the obvious move
-looks like the opposite: deleting and recreating the repository *would* really remove the
-objects, but it needs the owner to act and it is irreversible. Publishing was **always**
-going to need the owner to act exactly once. Spending that one action on **creating a new
-repository** instead of **destroying the old one** leaves the owner doing no more work than
-before, and reduces the number of irreversible operations to **zero**.
+> ⚠️ **What this superseded, kept visible on purpose.** Until 2026-08-31 the disposition
+> read: *"① This repository is an internal working repository and is never made public.
+> ② Any public release ships from a NEW repository, with a history that is clean from its
+> very first commit."* The reasoning for it was that publishing needed the owner to act
+> once anyway, so spending that action on **creating** a new repository rather than
+> **destroying** this one kept the irreversible-operation count at **zero**.
+> ⭐ **That reasoning was sound and is not what changed.** It answered *"how do we publish
+> without shipping the names?"*. On 2026-08-31 the owner answered a prior question instead
+> — *"do the names need withholding at all?"* — with **no**, having seen what they are. A
+> premise was removed, so the conclusion built on it no longer applies. **The paragraph is
+> struck through rather than deleted**, so that a reader who remembers the old rule can see
+> it was reversed deliberately and by whom, instead of wondering whether it was lost.
+> ⚠️ **它取代了什么，这里有意留着可见。** 2026-08-31 之前的处置是：「① 本仓是内部工作仓，
+> 永不转 public；② 任何公开发布都从一个全新仓推出，历史从第一个提交起就干净。」
+> 其理由是：对外发布本来就要仓主动手一次，把那一次用在**建新仓**而不是**销毁旧仓**上，
+> 可以让不可逆动作数保持为**零**。
+> ⭐ **那套推理本身没问题，变的也不是它。** 它回答的是「怎么在不带出人名的前提下发布」；
+> 2026-08-31 仓主回答的是更前面那一问——「这些人名到底需不需要扣住」——答案是**不需要**，
+> 因为他已看过那是什么。**前提被拿掉了，建立在它之上的结论自然不再适用。**
+> 这一段是**划掉保留**而不是删掉，好让记得旧规则的人看见它是被谁、被有意地反转的，
+> 而不是怀疑它是不是丢了。
 
 ⚠️ **A boundary on this entry itself**: the names here are account-roster aliases. This
 entry is not a statement that nothing else is in the history — the pattern table
 structurally cannot answer "is there anything the roster does not list", which is what the
 human review passes are for. See [What the scanner structurally cannot cover](#what-the-scanner-structurally-cannot-cover--扫描器结构性覆盖不到什么).
 
-⚠️ **状态：存在、已接受、不再处置，而且它改变了本仓可以被用来做什么。**
-这是**对下一个读到它的人的长期约束**，不是对某一个里程碑的说明。
+⚠️ **状态：存在、已接受、不再处置——且自 2026-08-31 起，它不再限制本仓可以被用来做什么。**
+（本段在那之前写的是「它改变了本仓可以被用来做什么」，并自称长期约束；该约束已由仓主解除，
+见本文件顶部横幅。**名字仍在，只是不再构成扣住本仓不发布的理由。**）
 
 真实人名（账号名册别名的短形态）在本仓的 git 对象里。它们是迁移回归套件时从基线**原样照抄**
 过来的，位置在 **`test/quota-sentinel.test.sh` 的历史版本**。
@@ -427,13 +539,16 @@ commit，**四个全部成功**，旧文件内容照样取得出来。所以重�
 为真、在**对象层**为假。⚠️ **再重写一次也没用**：那些旧 commit 早已不可达，
 而问题恰恰不是「不可达」，是「**仍被供应**」。
 
-**因此处置是**：① **本仓是内部工作仓，永不转 public**；
-② **任何公开发布都从一个全新仓推出，历史从第一个提交起就是干净的**，而不是重写本仓。
+**2026-08-31 起的处置是**：① **本仓可以转 public**；② **公开发布就从本仓推出**——
+不另起新仓，也不重写历史。
 
-**为什么这条反而更省**（值得写下来，因为看起来显然的做法正相反）：删仓重建**确实**能真删掉
-那些对象，但它需要仓主动手，而且不可逆。而「对外发布」**本来就**需要仓主动手一次。
-把那一次用在**建一个新仓**而不是**销毁旧仓**上，仓主的参与量不比原来多，
-且不可逆动作降到**零**。
+> ⚠️ **它取代了什么，有意留着可见**：2026-08-31 之前写的是「① 本仓是内部工作仓，永不转
+> public；② 任何公开发布都从一个全新仓推出」，理由是「对外发布本来就要仓主动手一次，
+> 把那一次用在**建新仓**而不是**销毁旧仓**上，不可逆动作降到**零**」。
+> ⭐ **那套推理没错，变的也不是它**——它答的是「怎么在不带出人名的前提下发布」；
+> 仓主 2026-08-31 答的是更前面那一问「这些人名到底需不需要扣住」，答案是**不需要**。
+> 前提被拿掉，结论自然不再适用。这里**划掉保留而不删除**，好让记得旧规则的人看出它是
+> 被有意反转的，而不是被弄丢了。
 
 ⚠️ **本条自身的边界**：这里说的是账号名册别名。本条**不是**在声称历史里没有别的东西——
 模式表结构上答不了「名册之外还有没有」，那正是人工复核存在的理由。

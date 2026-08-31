@@ -33,25 +33,32 @@ unfalsifiable one.
 > 不能说明账号能不能用**——实测有账号显示「已过期 2 天」却好好的，也有显示「2 小时后
 > 才过期」却已经废了。如果你曾经按凭据过期时间给账号排过序，本仓讲的就是这一类事。
 
-> 🔴🔴 **THIS REPOSITORY MUST NEVER BE MADE PUBLIC — and a history rewrite would not
-> change that.** Its **git objects** contain real people's names (the working tree is
-> clean; the object layer is not). **`force-push` does not delete remote objects** — measured
-> on this repository: from a fresh clone, superseded commits fetched **by SHA** still come
-> back with their old contents. ⇒ **Any public release ships from a NEW repository whose
-> history is clean from its first commit.** Full reasoning and the range-by-range counts:
-> [docs/REDACTION.md](docs/REDACTION.md#never-public--本仓永不转-public).
-> 🔴🔴 **本仓永远不得转为 public——而且重写历史改变不了这一点。** 它的 **git 对象**里含
-> 真实人名（工作树是干净的，对象层不是）。**`force-push` 不删除远端对象**——本仓实测：
-> 从全新 clone 按 **SHA** 去 fetch 已被取代的 commit，旧内容照样取得出来。
-> ⇒ **任何公开发布都从一个全新仓推出，历史从第一个提交起就干净。**
+> ✅ **SUPERSEDED 2026-08-31 — this repository may be made public, and a release ships from
+> THIS repository.** A 🔴🔴 banner here said the opposite until the owner, shown what the
+> names actually are, lifted that line on 2026-08-31.
+> ⚠️ **The measurement it rested on is unchanged and is not retracted**: the **git objects**
+> contain real given names (the working tree is clean; the object layer is not), and
+> **`force-push` does not delete remote objects** — measured on this repository: from a
+> fresh clone, superseded commits fetched **by SHA** still come back with their old
+> contents. What changed is the **disposition**, not the finding. Range-by-range counts and
+> the full before/after:
+> [docs/REDACTION.md](docs/REDACTION.md#real-names-in-the-git-objects--git-对象里的真实人名).
+> ✅ **2026-08-31 作废——本仓可以转 public，且发布就从本仓推出。** 这里原本是一条 🔴🔴
+> 相反的横幅，仓主看过那些名字实际是什么之后，于 2026-08-31 解除了它。
+> ⚠️ **它所依据的测量没有变，也不是撤回**：**git 对象**里确有真实名字（工作树干净、对象层
+> 不干净），且 **`force-push` 不删除远端对象**——本仓实测：从全新 clone 按 **SHA** 去 fetch
+> 已被取代的 commit，旧内容照样取得出来。变的是**处置决定**，不是**发现**。
 
 ## Quick start / 一分钟跑起来
 
-⚠️ The URL below is **this private repository**. It is here because a first screen needs a
-runnable command, not because you can clone it — a public release will live somewhere
-else, and **this line must be changed when that happens** (see the banner above).
-⚠️ 下面这个 URL 指向的是**这个私有仓**。它在这里是因为第一屏需要一条可运行的命令，
-不是因为你 clone 得到——公开版会在别处，**到那时这一行必须改**（见上面的横幅）。
+✅ **The URL below is the real one and stays the real one.** Until 2026-08-31 this
+paragraph warned that the URL pointed at a private repository, that a public release would
+live *somewhere else*, and that **this line must be changed when that happens**. That
+instruction is now retired: the release ships from **this** repository, so there is no
+other URL coming and nothing here to change (see the banner above).
+✅ **下面这个 URL 就是正式的那个，而且不会再换。** 2026-08-31 之前这段写的是：该 URL 指向
+一个私有仓、公开版会在**别处**、**到那时这一行必须改**。该指令现已作废——发布就从**本仓**
+推出，不会再有另一个 URL，这一行也没有什么要改的了（见上面的横幅）。
 
 ```sh
 git clone https://github.com/xinbaijun/claude-quota-sentinel.git
@@ -1420,11 +1427,12 @@ all:**
    not thereby proven worthless — it is unproven, which is not the same thing.
 3. ⚠️ **This exemption covers the assertion↔ablation pair, and nothing wider.** It says
    some assertions lack an ablation; it does **not** excuse a guard that has **no
-   assertion at all**, which never enters the pair and so cannot be exempted by it. Two
-   such guards were found on 2026-08-31 (G-7's `quota_ratio_update()`, G-8's
-   `backup_roots()`) and both now have controls. **Do not cite boundary 2 against a guard
-   with zero assertions** — that is the reading under which "nothing tests this" and
-   "this is a documented exception" become the same sentence.
+   assertion at all**, which never enters the pair and so cannot be exempted by it. Three
+   such guards were found on 2026-08-31 — G-7's `quota_ratio_update()`, G-8's
+   `backup_roots()`, and G-4's fallback offset self-check — and all three now have
+   controls. **Do not cite boundary 2 against a guard with zero assertions** — that is the
+   reading under which "nothing tests this" and "this is a documented exception" become the
+   same sentence.
 4. ⚠️ **A proven entry is not a proven mechanism.** An entry that cites four functions is
    proven when *one* of them goes red; the other three may still be unexercised. The ones
    measured as unproven are named in
@@ -1437,8 +1445,9 @@ all:**
 一条没有消融的断言不因此就是没用的，它是**未被证明**的——这两件事不一样。
 ③⚠️ **这条豁免覆盖的是「断言↔消融」这一对，不覆盖更宽的东西。**它说的是有些断言没配消融；
 它**不豁免一条断言都没有的守卫**——那种守卫压根进不到这一对里，也就无从被它豁免。
-2026-08-31 实测查出两条这样的守卫（G-7 的 `quota_ratio_update()`、G-8 的 `backup_roots()`），
-现已各自补控。**不要拿第②条去搪塞一条零断言的守卫**：那种读法会让「没有任何东西测它」
+2026-08-31 实测查出**三条**这样的守卫（G-7 的 `quota_ratio_update()`、G-8 的
+`backup_roots()`、G-4 的兜底偏移自检），现已各自补控。
+**不要拿第②条去搪塞一条零断言的守卫**：那种读法会让「没有任何东西测它」
 与「这是写明的例外」变成同一句话。
 ④⚠️ **条目被证明 ≠ 它点名的每个机制都被证明。**一条点名了四个函数的条目，只要其中
 **一个**会红它就算已证明，另外三个仍可能从未被执行。实测未被证明的那几个逐条列在
@@ -1466,21 +1475,42 @@ was broken.
 | what / 什么 | status / 状态 |
 |---|---|
 | **G-3** as a whole | The executing half (the isolated-container liveness prober) **was not extracted** — see that entry's own ⚠️ Scope note. What ships is the evidence, the reasoning, and a read-only usage query that needs a live account and network to run at all. **There is no triggering condition to break here**, so G-3 is excluded from the numerator rather than counted as passing. / 执行的那一半（容器活体探测器）**没有抽取过来**，本仓没有可弄坏的触发条件 ⇒ G-3 不计入分子，也不算通过。 |
-| **G-4** · the parse-entry offset self-check | `quota_parse_reset_epoch()` accepts any `^[+-][0-9]{4}$`, and a bare zone abbreviation resolves to **`+0000`** — measured on the host: `TZ=XYZ date +%z` → `+0000`. So the self-check passes on exactly the input incident (a) was about. Removing it entirely leaves the suite fully green. G-4 is proven by its **other** mechanisms (`quota_fmt_ts`, `quota_iso_epoch`, the horizon clamp), not by this one. / 该自检把 `+0000` 判为合法，而裸缩写正好解析成 `+0000` ⇒ 它对事故 (a) 那个输入恒真；整条删掉套件依然全绿。G-4 是靠**另外三个**机制证明的，不是靠这一条。 |
 | **G-1** · either window-order branch **alone** | Disabling *one* of the two `quota_reset_later_window` branches in `quota_frame_stale()` leaves the suite green — the other branch catches the same fixtures. G-1 is proven at the **mechanism** level (disabling the shared primitive turns 3 assertions red), not per branch. / 单独关掉两条窗口序分支里的任何一条，套件仍全绿（另一条兜住了同一批夹具）。G-1 是在**机制**层证明的，不是逐分支。 |
 | **G-2** · the *empty* cache field | The shipped case covers a **stale** `usage_uuid`. The literal incident was a cache field that came back **empty** from a restore; widening the identity-missing predicate to include `-z "$usage_uuid"` stays green. / 出厂用例覆盖的是缓存**滞后**；事故原形是恢复后缓存**为空**，把它加进 identity-missing 判据套件仍全绿。 |
 | the range-C **allowance** in `tools/dod4-allow.local.txt` | The allowance is correctly literal-scoped (verified: a different local part at the same domain is still reported). But **no standing control covers it**, and `tools/dod4-scan.posctrl.sh` structurally cannot: it plants its own `*.local.txt` marker files into a throwaway clone and a gitignored allow file cannot travel there. Measured 2026-08-31 — with a deliberately domain-wide allowance in force, `dod4-scan.sh` reported **`CLEAN hits=0`** while `dod4-scan.posctrl.sh` still reported **`RANGE C-message fired OK`** and `POSCTRL_RESULT=PASS`. ⭐ That control proves the C **traversal** runs; it cannot prove the C **verdict** is unblinded. / 该豁免的射程确实是字面串（已复核：同域另一地址仍被报出）。但**没有常设控**，而且 `dod4-scan.posctrl.sh` 结构上也做不到：它往一次性 clone 里自己种 `*.local.txt` 标记，而已 gitignore 的 allow 文件根本进不了那份 clone。实测：把豁免故意放宽成整域之后，`dod4-scan.sh` 报 **`CLEAN hits=0`**，而 posctrl 仍报 **`RANGE C-message fired OK`**。⭐ 它证明的是 C 范围**走到了**，不是 C 范围的**结论没被蒙住**。 |
 
-⭐ **Two of these were found because the guard existed and was never executed**, which is
-the same shape as G-5's own lesson: a guard that has never been observed to go red tells
-you nothing when it is green. `quota_ratio_update()` (G-7) could be replaced by
-`{ return 0; }` and `backup_roots()` (G-8) could drop its old root, and **the suite, the
-ablations and `switch-selftest` all stayed green on both**. Controls for both were added on
-2026-08-31 and each was verified red against the real defect, not against a stand-in.
-⭐ **其中两条之所以被发现，是因为守卫存在但从未被执行过**——与 G-5 自己那条教训同形。
-`quota_ratio_update()`（G-7）可以整个换成 `{ return 0; }`，`backup_roots()`（G-8）可以
-把旧根丢掉，而**回归套件、消融表与 switch-selftest 三者对这两个改动全绿**。两条控已于
-2026-08-31 补上，且都拿**真实缺陷**验过会红，不是拿替身验的。
+**Fixed on 2026-08-31 rather than excluded — three guards that were green for the wrong
+reason.** Listed here because the audit that found them is what this section documents, and
+because two of the three failed in ways worth telling apart:
+
+- **Never executed** (2): `quota_ratio_update()` (G-7) could be replaced wholesale by
+  `{ return 0; }`, and `backup_roots()` (G-8) could drop its old root, with **the suite,
+  the ablations and `switch-selftest` all staying green on both**.
+- **Executed on every parse, but always true** (1): the fallback offset self-check in
+  `quota_parse_reset_epoch()` / `quota_panel_reset_epoch()` tested `%z =~ ^[+-][0-9]{4}$`,
+  which **accepts `+0000`** — precisely what a bare abbreviation degrades to (`TZ=CST date
+  +%z` → `+0000` on this host). It ran constantly and could not fail. ⭐ **This is the
+  harder of the two to notice**: a guard that never runs at least leaves a coverage hole
+  someone might count, whereas an always-true guard reports success forever. The predicate
+  now tests the **form** of the spec (`quota_tz_spec_usable()` in `lib/config.sh`), never
+  the numeric offset — requiring a particular offset would re-introduce the hard-coded site
+  fact this extraction removed.
+
+Each of the three now has a control that was **verified red against the real defect, not
+against a stand-in**.
+**2026-08-31 修掉而不是列进例外的三条——三条「绿得没道理」的守卫。** 列在这里是因为
+本节记录的正是那次核查；而三条里有两种不同的坏法，值得分开说：
+
+- **从未被执行**（2 条）：`quota_ratio_update()`（G-7）可以整个换成 `{ return 0; }`，
+  `backup_roots()`（G-8）可以把旧根丢掉，而**回归套件、消融表与 switch-selftest 三者全绿**。
+- **每次解析都执行，但恒真**（1 条）：兜底偏移自检判的是 `%z =~ ^[+-][0-9]{4}$`，
+  它**接受 `+0000`**——而裸缩写恰恰就降级成 `+0000`（本机 `TZ=CST date +%z` → `+0000`）。
+  它一直在跑，却不可能失败。⭐ **这一种比前一种更难发现**：不跑的守卫至少留下一个能被
+  数出来的覆盖空洞，而恒真的守卫会永远报成功。现在的判据看的是规格的**形态**
+  （`lib/config.sh :: quota_tz_spec_usable()`），不看偏移量数值——要求某个具体偏移
+  等于把本次抽取刚去掉的站点事实又写死回来。
+
+三条现在各自都有控，且都是拿**真实缺陷**验过会红，不是拿替身验的。
 
 🔴 **We have not found a comparable project shipping this as a publicly checkable
 artifact.** Note the wording: **"we have not found"**, not "nobody does". Incident-driven
@@ -1559,28 +1589,36 @@ Extracted from a private in-house fleet-automation codebase at commit `e2f32279`
 Upstream changes after that commit are **not** tracked and **not** synced back.
 抽取自内部私有编队自动化代码库的 `e2f32279`；该 commit 之后的上游改动**不追平、不双向同步**。
 
-### 🔴 Note for maintainers — this repository is never made public
-### 🔴 维护者须知：本仓永不转 public
+### ✅ Note for maintainers — real names are in the git objects, and that is accepted
+### ✅ 维护者须知：git 对象里有真实人名，且此事已被接受
 
-**This repository must not be made public, and a history rewrite would not change that.**
-Its git objects contain real people's names, carried over from the baseline; the working
-tree is clean (0 occurrences) but the object layer is not (114 lines in historical versions
-of one test file), and **`force-push` does not delete remote objects** — measured on this
-repository, by fetching superseded commits by SHA from a fresh clone and getting the old
-contents back.
+> **Superseded 2026-08-31.** This heading and section said *"this repository is never made
+> public"* and *"any public release ships from a NEW repository"*. The owner lifted that
+> on 2026-08-31 after seeing what the names are. **Struck in place, not silently rewritten**
+> — an expired prohibition produces no error, it just keeps a release from happening while
+> everyone assumes it is still pending.
+> **2026-08-31 作废。** 本节标题与正文原本写的是「本仓永不转 public」「任何公开发布都从
+> 一个全新仓推出」。仓主在看过那些名字是什么之后，于 2026-08-31 解除了它。
+> **就地划掉、不是被悄悄改写**——一条过期的禁令不会报错，它只会让发布一直不发生，
+> 而所有人都以为它还在排队。
 
-⇒ **Any public release ships from a NEW repository whose history is clean from its first
-commit.** The full reasoning, the range-by-range counts, and why that path costs the owner
-*less* than deleting and recreating this one, are in
-[docs/REDACTION.md](docs/REDACTION.md#never-public--本仓永不转-public).
+**The finding, unchanged.** This repository's git objects contain real given names carried
+over from the baseline; the working tree is clean (0 occurrences) but the object layer is
+not (114 lines in historical versions of one test file), and **`force-push` does not delete
+remote objects** — measured on this repository, by fetching superseded commits by SHA from
+a fresh clone and getting the old contents back.
 
-**本仓不得转为 public，而且重写历史改变不了这一点。** 它的 git 对象里含从基线照抄过来的
-真实人名；工作树是干净的（0 处），但对象层不是（某个测试文件的历史版本里 114 行），
-而 **`force-push` 不删除远端对象**——本仓实测过：从全新 clone 按 SHA 去 fetch 已被取代的
-commit，旧内容照样取得出来。
-⇒ **任何公开发布都从一个全新仓推出，历史从第一个提交起就干净。**
-完整理由、分范围计数、以及为什么这条路比删仓重建让仓主**更省**，见
-[docs/REDACTION.md](docs/REDACTION.md#never-public--本仓永不转-public)。
+**The disposition, as of 2026-08-31.** This repository may be made public, and a release
+ships from **this** repository — no new repository, no rewrite. What the 114 lines contain,
+why that was judged acceptable, and the range-by-range counts are in
+[docs/REDACTION.md](docs/REDACTION.md#real-names-in-the-git-objects--git-对象里的真实人名).
+
+**发现本身没有变。** 本仓 git 对象里含从基线照抄过来的真实名字；工作树干净（0 处），
+对象层不干净（某个测试文件的历史版本里 114 行），而 **`force-push` 不删除远端对象**
+——本仓实测过：从全新 clone 按 SHA 去 fetch 已被取代的 commit，旧内容照样取得出来。
+**2026-08-31 起的处置**：本仓可以转 public，发布就从**本仓**推出，不另起新仓、不重写历史。
+那 114 行是什么、为何判为可接受、分范围计数，见
+[docs/REDACTION.md](docs/REDACTION.md#real-names-in-the-git-objects--git-对象里的真实人名)。
 
 ### Note for maintainers — how to copy source files / 维护者须知：源文件怎么复制
 
