@@ -423,11 +423,29 @@ echo "── 选单入口：客户端 改了选项文案之后还认不认得出
 # 实测背景：客户端把选项 2 从 "Switch to usage credits" 改成 "Upgrade your plan"，
 # 旧判据逐字锚这行 → 此后 28 天 menu-detected 恒为 0，同期横幅分支跑了 165+ 次
 # （所以整体看起来一直在工作），撞限会话只能等人手动清掉对话框。
-if legacy_call usage_menu_present "$(read_fx menu-new-wording.txt)"; then
-  fail "对照组应当在新文案上失效（它却命中了，说明本用例没复现原缺陷）"
-else
-  pass "对照组在新文案上确实进不去（复现了 28 天哑掉的那条）"
-fi
+# ⚠️ No flake branch here, and that is deliberate -- this site is the MIRROR IMAGE of the
+#    three above, so the same verdict maps to the opposite outcome:
+#      · above: the control group is expected TO match. A SIGPIPE means it never got to
+#        answer -> no conclusion available -> FLAKE.
+#      · here:  the control group is expected NOT to match. `sigpipe` means "with pipefail
+#        off it DOES match" -> the true answer is that it matched -> this case failed to
+#        reproduce the original incident -> FAIL. Calling that a flake would be the bug.
+#    What the old spelling did wrong: `if legacy_call …; then fail; else pass; fi` read ANY
+#    non-zero as "did not match", and a SIGPIPE is non-zero. So a real match that happened
+#    to be masked by SIGPIPE was read as "reproduced successfully" and the case went GREEN.
+#    ⭐ That direction is a false GREEN, not a false red -- it has the shape of a pass, so
+#    nobody would ever have gone to look at it. Closed 2026-09-02.
+# ⚠️ 这里**没有** flake 分支，是有意的：本处与上面三处**方向相反**，同一个结论要映射到相反的处置。
+#    · 上面三处期望对照组**命中**；SIGPIPE 意味着它没能给出结论 ⇒ 判 FLAKE。
+#    · 这里期望对照组**不命中**；`sigpipe` 意味着「关掉 pipefail 它是命中的」⇒ 真实答案就是命中
+#      ⇒ 本用例没能复现原缺陷 ⇒ 必须判 FAIL。把它当 flake 才是错。
+#    旧写法错在哪：`if legacy_call …; then fail; else pass; fi` 把**任何**非零都读成「没命中」，
+#    而 SIGPIPE 就是非零 ⇒ 一次被 SIGPIPE 掩盖的**真命中**会被读成「复现成功」而**变绿**。
+#    ⭐ 这个方向是假**绿**不是假红——它长着「通过」的形状，因此不会有任何人去查它。2026-09-02 闭合。
+case "$(legacy_verdict usage_menu_present "$(read_fx menu-new-wording.txt)")" in
+  no)          pass "对照组在新文案上确实进不去（复现了 28 天哑掉的那条）" ;;
+  yes|sigpipe) fail "对照组应当在新文案上失效（它却命中了，说明本用例没复现原缺陷）" ;;
+esac
 if quota_menu_present "$(read_fx menu-new-wording.txt)"; then
   pass "新判据认得出新文案选单"
 else

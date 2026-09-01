@@ -1606,6 +1606,35 @@ Extracted from a private in-house fleet-automation codebase at commit `e2f32279`
 Upstream changes after that commit are **not** tracked and **not** synced back.
 抽取自内部私有编队自动化代码库的 `e2f32279`；该 commit 之后的上游改动**不追平、不双向同步**。
 
+### Note for maintainers — release tags are moved exactly never / 维护者须知：发布 tag 永不重打
+
+`v0.1.0` was re-cut **once**, on 2026-09-02, from `669cb64` onto `0d4e7ec`, because a fix
+landed after the tag was first created and the tag would otherwise have named a release
+that did not contain it.
+
+⭐ **That was allowed only because nothing had been published yet.** A tag is a promise
+about *what other people downloaded*. This repository had never been public, nobody had
+cloned anything, so there was no promise available to break — the tag was simply pointing
+at the wrong object.
+
+🛑 **From the moment this repository becomes public, that stops being true.** A published
+tag is never moved, re-cut, or deleted: someone may already have fetched it, pinned it, or
+built against it, and moving it makes two different trees answer to one name — silently,
+because git will not warn either of you. If a released version is wrong, **ship a new
+version number**. This is the one action the "we can always fix it" reflex must not reach.
+
+`v0.1.0` 在 2026-09-02 被重打过**一次**——从 `669cb64` 移到 `0d4e7ec`，因为首次打完 tag 之后
+又落了一个修复，不移的话这个 tag 指的就是一个不含该修复的版本。
+
+⭐ **这件事之所以被允许，只因为当时还没有任何东西被发布出去。** tag 是对「别人下载到的
+东西」的承诺；本仓当时从未公开、没有任何人 clone 过，所以还不存在可以被打破的承诺——
+它只是指错了对象。
+
+🛑 **一旦本仓转为 public，上面这条就不再成立。** 已发布的 tag 永不移动、永不重打、永不删除：
+可能已经有人 fetch 了它、钉了它、照着它构建；移动它会让两棵不同的树对应同一个名字，
+而且是**静默的**——git 不会警告你们中的任何一方。发布出去的版本有问题，**就发一个新版本号**。
+「反正还能改」这个反射，唯独不许伸到这件事上。
+
 ### ✅ Note for maintainers — real names are in the git objects, and that is accepted
 ### ✅ 维护者须知：git 对象里有真实人名，且此事已被接受
 
