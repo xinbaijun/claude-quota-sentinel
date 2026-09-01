@@ -9,7 +9,7 @@ on demand, and every entry is annotated with the incident that forced it into ex
 That is the point of this repository — more than the switching itself, which several other
 projects do more comfortably (see
 [What this does not do](#what-this-does-not-do--不解决什么)).
-⚠️ **The denominator is stated, not implied**: the tenth entry (**G-3**) documents a guard
+⚠️ **The denominator is stated, not implied**: the remaining entry (**G-3**) documents a guard
 whose executing half **was not extracted into this repository**, and a handful of named
 mechanisms inside otherwise-proven entries are **unproven rather than proven**. Both lists
 are written out in
@@ -18,7 +18,7 @@ are written out in
 unfalsifiable one.
 **下面十条里有九条带着可执行的守卫、且都能当场证明它会红；十条都标着逼它出现的那次事故。**
 这才是本仓的重点——切号本身有别的项目做得更顺手（见「不解决什么」）。
-⚠️ **分母是写出来的，不是暗示的**：第十条（**G-3**）记的那条守卫，其**执行的那一半没有
+⚠️ **分母是写出来的，不是暗示的**：剩下的那一条（**G-3**）记的那条守卫，其**执行的那一半没有
 被抽取进本仓**；另外还有若干条被点名的机制，落在「已证明会红」的条目里但**自身未被证明**。
 两张单子都逐条写在
 [这句总括声称的分母](#what-the-red-state-claim-covers--这句总括声称的分母) 里。

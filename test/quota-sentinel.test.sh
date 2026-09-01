@@ -60,9 +60,33 @@ TMP=$(mktemp -d "${TMPDIR:-/tmp}/quota-sentinel-test.XXXXXX") || {
   exit 3; }
 trap 'rm -rf "$TMP"' EXIT
 
-PASS=0; FAIL=0
+PASS=0; FAIL=0; FLAKE=0
 pass() { printf '  PASS %s\n' "$1"; PASS=$((PASS+1)); }
 fail() { printf '  FAIL %s\n' "$1"; FAIL=$((FAIL+1)); }
+# flake() is NOT a third verdict for "we could not decide". It is used at exactly the
+# points where the frozen control group died of SIGPIPE instead of answering, and it is
+# only ever reached after the same predicate has been re-evaluated and SUCCEEDED (see
+# legacy_verdict below). It does not count towards FAIL: every FAIL in this suite has to
+# stay a real defect, because "a red you can trust" is the whole claim this repository
+# makes. A red that fires at random on a loaded machine would destroy exactly that.
+# flake() 不是「判不了」这种第三种结论。它只出现在「冻结对照组死于 SIGPIPE、没能给出答案」
+# 这一个位置，且只有在同一个判据被重判且**通过**之后才会走到（见下面 legacy_verdict）。
+# 它不计入 FAIL:本套件里每一条 FAIL 都必须是真缺陷——「红是可信的」正是本仓的全部声称，
+# 而一条在有负载的机器上随机出现的红，恰好摧毁的就是它。
+flake() {
+  printf '  FLAKE %s\n' "$1"
+  printf '        ^ environment, not a defect. The frozen control group\n'
+  printf '          (test/fixtures/legacy-detectors.sh:91-92,:101) matches by piping into `grep -q`.\n'
+  printf '          Under `set -o pipefail` a matching `grep -q` exits first, the writer is left\n'
+  printf '          writing into a closed pipe, dies of SIGPIPE, and the pipeline reports 141\n'
+  printf '          **even though the pattern matched** (PIPESTATUS is exactly [141 0]).\n'
+  printf '          Re-evaluated with pipefail off, this predicate SUCCEEDS -- the judges agree.\n'
+  printf '          Load-dependent: measured 1 run in 20 at load 45, and 0 in 200 at load <= 25.\n'
+  printf '          环境抖动，不是缺陷:冻结对照组把内容管进 `grep -q` 做匹配;pipefail 下命中的\n'
+  printf '          grep 先退出,写入方被 SIGPIPE 打死,整条管道回报 141——尽管模式确实命中。\n'
+  printf '          关掉 pipefail 重判即通过,说明两个判据其实一致。只在机器有负载时出现。\n'
+  FLAKE=$((FLAKE+1))
+}
 
 # ── Control group: the detectors as they were BEFORE the rewrite ──────────────
 # Upstream this was fetched live from the private repository's history with a pinned
@@ -85,6 +109,57 @@ if [[ "$_legacy_now" != "$QS_LEGACY_SHA256" ]]; then
   exit 1
 fi
 unset _legacy_now
+
+# ── Telling an environmental red apart from a real one ───────────────────────────────
+# The frozen control group matches with `echo "$x" | grep -qE …`. This suite runs under
+# `set -o pipefail` (set at the top of this file), and under pipefail a `grep -q` that
+# exits the instant it matches leaves the writer writing into a pipe nobody reads any
+# more: the writer dies of SIGPIPE and the PIPELINE reports 141 **even though the
+# pattern matched**. PIPESTATUS at that moment is exactly `[141 0]` -- writer killed,
+# matcher succeeded. The frozen code then converts that 141 into `return 1` through its
+# own `|| return 1`, so by the time a caller sees it, a successful match has turned into
+# an ordinary "no match", and the assertion reports a disagreement that does not exist.
+#
+# Measured on a 16-core host, 2026-08-31/09-01: with pipefail ON the unmodified suite
+# failed this way 1 run in 20 at load 45; an in-suite loop of the identical expression
+# failed 7-33 per 200 at load 28-35, and 0 per 200 at load 23-25. With pipefail OFF the
+# predicate failed 0 times in 300 -- while the SIGPIPE race itself still happened at the
+# same rate (40 per 600 with pipefail on, 37 per 600 with it off).
+# ⭐ So pipefail is not the cause of the race. It is only the switch that decides whether
+#   an already-occurring race becomes a failure.
+#
+# Why the fix is here and not in the fixture: that pipeline IS the pre-rewrite specimen,
+# its sha256 is asserted a few lines above, and rewriting it would rewrite the thing
+# every "the old detector got this wrong" assertion compares against. So the control
+# group keeps its bug, and the caller learns to recognise it.
+#
+# ⭐ Why this cannot bury a real regression: the frozen code and the fixtures are both
+#   deterministic, so a genuine disagreement fails under BOTH pipefail settings. Only a
+#   failure that DISAPPEARS when pipefail is switched off can have come from the pipe.
+#   The dangerous direction -- a real defect relabelled as "environment" -- is closed by
+#   construction rather than by judgement, which matters because that direction is the
+#   one nobody goes looking in.
+#
+# 分清「环境造成的红」与「真的红」。冻结对照组用 `echo "$x" | grep -qE …` 匹配，而本套件开着
+# `pipefail`:命中即退出的 `grep -q` 会让写入方写进一根没人读的管道 → 被 SIGPIPE 打死 →
+# **尽管模式命中**，整条管道仍回报 141(此刻 PIPESTATUS 恰为 `[141 0]`)。冻结代码再用它自己的
+# `|| return 1` 把 141 变成 `return 1` ⇒ 到调用方眼里，一次成功的匹配已经变成「没匹配」，
+# 断言于是报告一个并不存在的分歧。
+# 实测(16 核宿主):开 pipefail 时未改动的套件在 load 45 下 20 次红 1 次;套件内同一表达式在
+# load 28-35 下每 200 次红 7-33 次，load 23-25 下 0 次;关掉 pipefail 则 300 次 0 红——而
+# SIGPIPE 竞态本身发生率几乎不变(开 40/600、关 37/600)。⭐ pipefail 不是竞态的成因，它只是
+# 决定这场已经发生的竞态要不要变成一次失败的开关。
+# 为什么改在这里而不改夹具:那条管道**就是**重构前的标本，它的 sha256 在上面几行被逐次校验，
+# 改它等于改掉所有「旧判据当年错在哪」所对照的那个东西。⇒ 对照组保留它的 bug，由调用方学会认它。
+# ⭐ 为什么这不会把真回归埋掉:冻结代码与夹具都是确定性的，真的分歧在**两种** pipefail 设置下
+#   都会失败;只有「关掉 pipefail 就消失」的失败才可能来自管道。「把真缺陷标成环境问题」这个
+#   危险方向是被构造堵死的，不是靠判断——而那正是没人会去查的方向。
+#
+# echoes exactly one of: yes | no | sigpipe
+legacy_verdict() {
+  if legacy_call "$@"; then printf 'yes\n'; return 0; fi
+  if ( set +o pipefail; legacy_call "$@" ); then printf 'sigpipe\n'; else printf 'no\n'; fi
+}
 
 # ── Subject under test / 被测 ────────────────────────────────────────────────
 # ⚠️ Point the state root at $TMP **before** sourcing. Almost every writable path in
@@ -360,11 +435,17 @@ else
 fi
 
 echo "── 选单入口：旧文案不得回归 ──"
-if legacy_call usage_menu_present "$(read_fx menu-old-wording.txt)" && quota_menu_present "$(read_fx menu-old-wording.txt)"; then
-  pass "新旧判据在旧文案上都命中（无回归）"
-else
-  fail "旧文案上新旧判据不一致"
-fi
+_old_wording="$(read_fx menu-old-wording.txt)"
+case "$(legacy_verdict usage_menu_present "$_old_wording")" in
+  yes)     if quota_menu_present "$_old_wording"; then
+             pass "新旧判据在旧文案上都命中（无回归）"
+           else
+             fail "旧文案上新旧判据不一致"
+           fi ;;
+  no)      fail "旧文案上新旧判据不一致" ;;
+  sigpipe) flake "旧文案：对照组这一次死于 SIGPIPE 而非给出判据，两个判据实际一致" ;;
+esac
+unset _old_wording
 
 echo "── 选单入口：scrollback 里的死选单不得误判 ──"
 if quota_menu_present "$(read_fx menu-in-scrollback.txt)"; then
@@ -383,11 +464,11 @@ echo "── 横幅入口：用户在对话里提到横幅文案（2026-08-11 �
 # 当天实撞：用户在对话里引用了一句撞限横幅作说明，监控当场把本会话判成撞限，
 # 建 episode、探活、并连发三次伪「额度已恢复」；同期另一个正在分析撞限日志的
 # 会话也被同样抓进队列。
-if legacy_call usage_banner_active "$(read_fx self-trigger-user-message.txt)"; then
-  pass "对照组确实会被用户消息触发（复现了当天的自激）"
-else
-  fail "对照组没被触发，本用例没复现原缺陷"
-fi
+case "$(legacy_verdict usage_banner_active "$(read_fx self-trigger-user-message.txt)")" in
+  yes)     pass "对照组确实会被用户消息触发（复现了当天的自激）" ;;
+  no)      fail "对照组没被触发，本用例没复现原缺陷" ;;
+  sigpipe) flake "自激用例：对照组这一次死于 SIGPIPE 而非给出判据，它其实被触发了" ;;
+esac
 if quota_banner_present "$(read_fx self-trigger-user-message.txt)" >/dev/null; then
   fail "新判据仍会被用户消息触发"
 else
@@ -395,11 +476,11 @@ else
 fi
 
 echo "── 横幅入口：用户正在 composer 里打这段字 ──"
-if legacy_call usage_banner_active "$(read_fx banner-in-composer.txt)"; then
-  pass "对照组确实会被 composer 里的半截输入触发"
-else
-  fail "对照组没被触发，本用例没复现原缺陷"
-fi
+case "$(legacy_verdict usage_banner_active "$(read_fx banner-in-composer.txt)")" in
+  yes)     pass "对照组确实会被 composer 里的半截输入触发" ;;
+  no)      fail "对照组没被触发，本用例没复现原缺陷" ;;
+  sigpipe) flake "composer 用例：对照组这一次死于 SIGPIPE 而非给出判据，它其实被触发了" ;;
+esac
 if quota_banner_present "$(read_fx banner-in-composer.txt)" >/dev/null; then
   fail "新判据仍被 composer 输入触发"
 else
@@ -4175,4 +4256,10 @@ esac
 run_isolation_check
 echo
 printf 'PASS %d   FAIL %d\n' "$PASS" "$FAIL"
+# FLAKE is reported on its own line and never folded into FAIL: the two are different
+# claims about the world, and a summary that adds them up would be exactly the kind of
+# "one aggregate verdict standing in for what actually happened" this suite argues against.
+# FLAKE 单独一行、绝不并进 FAIL:两者是关于世界的两种不同断言,而把它们加起来的汇总，
+# 正是本套件反复反对的那种「用一个汇总判词替代『到底发生了什么』」。
+(( FLAKE == 0 )) || printf 'FLAKE %d   (environment, not defects; see the FLAKE lines above / 环境抖动，非缺陷)\n' "$FLAKE"
 (( FAIL == 0 )) || exit 1
