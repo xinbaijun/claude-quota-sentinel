@@ -1608,9 +1608,18 @@ Upstream changes after that commit are **not** tracked and **not** synced back.
 
 ### Note for maintainers — release tags are moved exactly never / 维护者须知：发布 tag 永不重打
 
-`v0.1.0` was re-cut **once**, on 2026-09-02, from `669cb64` onto `0d4e7ec`, because a fix
-landed after the tag was first created and the tag would otherwise have named a release
-that did not contain it.
+During pre-publication development `v0.1.0` was cut, deleted and re-cut more than once,
+each time because further work landed after the tag existed and the tag would otherwise
+have named a release that did not contain it. **The exact sequence is deliberately not
+restated here** — read it from this repository's history and from the tag object itself.
+A count or a target SHA written into prose goes stale the next time anything moves, and
+it goes stale **silently**: nothing errors, nobody re-reads it.
+
+🛑 **Therefore the tag is cut LAST.** Cutting a release tag is the final action before
+handover, after every rework is done and the SHA will not move again. It is the one step
+that must never be taken while anything upstream of it can still change — twice during
+this repository's own pre-publication work a tag was cut mid-stream and was left naming
+the wrong commit within the hour.
 
 ⭐ **That was allowed only because nothing had been published yet.** A tag is a promise
 about *what other people downloaded*. This repository had never been public, nobody had
@@ -1623,8 +1632,14 @@ built against it, and moving it makes two different trees answer to one name —
 because git will not warn either of you. If a released version is wrong, **ship a new
 version number**. This is the one action the "we can always fix it" reflex must not reach.
 
-`v0.1.0` 在 2026-09-02 被重打过**一次**——从 `669cb64` 移到 `0d4e7ec`，因为首次打完 tag 之后
-又落了一个修复，不移的话这个 tag 指的就是一个不含该修复的版本。
+`v0.1.0` 在**尚未公开**的开发期里被打过、删过、又重打过不止一次，每次都是因为打完 tag 之后
+又落了新的工作，不动它这个 tag 指的就是一个不含该工作的版本。**确切次序刻意不在正文里复述**
+——以本仓历史与 tag 对象为准。写进散文里的次数或目标 SHA，下一次动它就作废，而且是**静默**
+作废:不报错，也不会有人回头再读一遍。
+
+🛑 **所以 tag 放到最后打。** 打发布 tag 是交付前的**最后一个动作**，排在所有返工之后、
+排在 SHA 不会再变之后。它是唯一一个「只要上游还可能变就绝不能做」的步骤——本仓自己在公开前的
+开发期里就有**两次**把 tag 打在了工作流中间，两次都在一小时内变成指着错误的 commit。
 
 ⭐ **这件事之所以被允许，只因为当时还没有任何东西被发布出去。** tag 是对「别人下载到的
 东西」的承诺；本仓当时从未公开、没有任何人 clone 过，所以还不存在可以被打破的承诺——

@@ -63,14 +63,35 @@ trap 'rm -rf "$TMP"' EXIT
 PASS=0; FAIL=0; FLAKE=0
 pass() { printf '  PASS %s\n' "$1"; PASS=$((PASS+1)); }
 fail() { printf '  FAIL %s\n' "$1"; FAIL=$((FAIL+1)); }
-# flake() is NOT a third verdict for "we could not decide". It is used at exactly the
-# points where the frozen control group died of SIGPIPE instead of answering, and it is
-# only ever reached after the same predicate has been re-evaluated and SUCCEEDED (see
-# legacy_verdict below). It does not count towards FAIL: every FAIL in this suite has to
-# stay a real defect, because "a red you can trust" is the whole claim this repository
-# makes. A red that fires at random on a loaded machine would destroy exactly that.
+# flake() is NOT a third verdict for "we could not decide". It is reached only where the
+# frozen control group died of SIGPIPE instead of answering, and only after that same
+# predicate has been re-evaluated with pipefail off and SUCCEEDED (see legacy_verdict).
+#
+# 🔴 PRECONDITION, shared by all THREE flake sites -- state it because violating it is not
+#    hypothetical, it happened here: **the shipped judge of the same case must already have
+#    been evaluated, and must have passed, before flake() may be printed.** flake() only
+#    ever excuses the CONTROL GROUP's half of a case. It must never stand in for the half
+#    that protects today's code. The first version of the menu-wording case evaluated the
+#    shipped judge inside the `yes)` branch only, so a `sigpipe` verdict skipped it and
+#    still printed "the judges agree" -- a live regression plus one SIGPIPE ended as
+#    PASS / rc=0. ⭐ A downgrade is only safe while it is strictly narrower than the thing
+#    it downgrades; the moment it swallows an unrelated assertion it is no longer a
+#    downgrade, it is a hole.
+#
+# It does not count towards FAIL: every FAIL in this suite has to stay a real defect,
+# because "a red you can trust" is the whole claim this repository makes. A red that fires
+# at random on a loaded machine would destroy exactly that.
 # flake() 不是「判不了」这种第三种结论。它只出现在「冻结对照组死于 SIGPIPE、没能给出答案」
-# 这一个位置，且只有在同一个判据被重判且**通过**之后才会走到（见下面 legacy_verdict）。
+# 之处，且只有在同一个判据被关掉 pipefail 重判且**通过**之后才会走到（见下面 legacy_verdict）。
+#
+# 🔴 **三个 flake 点共同的前置**，写出来是因为违反它不是假设、这里真的发生过：
+#    **同一用例的出厂判据必须已经被求值、且已经通过，才允许打印 flake()。**
+#    flake() 只赦免用例里**对照组**那一半，绝不能替代「保护今天这份代码」的那一半。
+#    选单文案那条用例的第一版把出厂判据的断言嵌在 `yes)` 分支里，于是 `sigpipe` 结论把它
+#    整条跳过，却照样打印「两个判据实际一致」——真回归叠一次 SIGPIPE，以 PASS / rc=0 收场。
+#    ⭐ 降级只在它**严格窄于**被降级之物时才是安全的;一旦它顺带吞掉一条无关断言，
+#    它就不再是降级，而是一个洞。
+#
 # 它不计入 FAIL:本套件里每一条 FAIL 都必须是真缺陷——「红是可信的」正是本仓的全部声称，
 # 而一条在有负载的机器上随机出现的红，恰好摧毁的就是它。
 flake() {
@@ -133,9 +154,15 @@ unset _legacy_now
 # every "the old detector got this wrong" assertion compares against. So the control
 # group keeps its bug, and the caller learns to recognise it.
 #
-# ⭐ Why this cannot bury a real regression: the frozen code and the fixtures are both
-#   deterministic, so a genuine disagreement fails under BOTH pipefail settings. Only a
-#   failure that DISAPPEARS when pipefail is switched off can have come from the pipe.
+# ⭐ Why this cannot bury a real regression -- note the scope, it covers less than it looks:
+#   the frozen code and the fixtures are both deterministic, so a genuine disagreement in
+#   THE CONTROL GROUP'S OWN VERDICT fails under BOTH pipefail settings. Only a failure that
+#   DISAPPEARS when pipefail is switched off can have come from the pipe.
+#   ⚠️ That argument covers the control group's half and NOTHING ELSE. On its own it does
+#   not stop a flake branch from skipping the case's shipped-judge assertion -- which is
+#   precisely what went wrong once here. The second half of the guarantee is the
+#   PRECONDITION stated at flake() above: the shipped judge must already have been
+#   evaluated and passed. Both halves are required; either alone is not enough.
 #   The dangerous direction -- a real defect relabelled as "environment" -- is closed by
 #   construction rather than by judgement, which matters because that direction is the
 #   one nobody goes looking in.
@@ -151,9 +178,13 @@ unset _legacy_now
 # 决定这场已经发生的竞态要不要变成一次失败的开关。
 # 为什么改在这里而不改夹具:那条管道**就是**重构前的标本，它的 sha256 在上面几行被逐次校验，
 # 改它等于改掉所有「旧判据当年错在哪」所对照的那个东西。⇒ 对照组保留它的 bug，由调用方学会认它。
-# ⭐ 为什么这不会把真回归埋掉:冻结代码与夹具都是确定性的，真的分歧在**两种** pipefail 设置下
-#   都会失败;只有「关掉 pipefail 就消失」的失败才可能来自管道。「把真缺陷标成环境问题」这个
-#   危险方向是被构造堵死的，不是靠判断——而那正是没人会去查的方向。
+# ⭐ 为什么这不会把真回归埋掉——**注意射程，它覆盖的比看上去少**:冻结代码与夹具都是确定性的，
+#   所以**对照组自身结论**上的真分歧在**两种** pipefail 设置下都会失败;只有「关掉 pipefail
+#   就消失」的失败才可能来自管道。
+#   ⚠️ 这个论证只覆盖对照组那一半，**别的什么都没覆盖**。它单独并不能阻止某个 flake 分支
+#   跳过该用例的**出厂判据断言**——而这里真的这样错过一次。保证的另一半是上面 flake() 处写死的
+#   **前置条件**:出厂判据必须已被求值且通过。**两半缺一不可，任何一半单独都不够。**
+#   「把真缺陷标成环境问题」这个危险方向是被构造堵死的，不是靠判断——而那正是没人会去查的方向。
 #
 # echoes exactly one of: yes | no | sigpipe
 legacy_verdict() {
@@ -454,16 +485,43 @@ fi
 
 echo "── 选单入口：旧文案不得回归 ──"
 _old_wording="$(read_fx menu-old-wording.txt)"
+# ⚠️ The shipped judge is evaluated OUTSIDE the case, unconditionally, and its result is
+#    consulted by every branch. It is written this way because the previous spelling put
+#    `if quota_menu_present …` INSIDE the `yes)` branch, so a `sigpipe` verdict skipped the
+#    shipped judge entirely -- and then printed "the judges agree", a claim that branch had
+#    never checked. A live regression plus one SIGPIPE therefore ended as PASS / rc=0.
+#    ⭐ The fix is structural rather than a second copy of the check: a per-branch copy is
+#    exactly the shape that allowed one branch to be missing it.
+# ⚠️ 出厂判据在 case **外面**无条件求值，各分支只读它的结果。这样写是因为上一版把
+#    `if quota_menu_present …` 嵌在 `yes)` 分支里，于是 `sigpipe` 结论会**整条跳过**出厂判据，
+#    却照样打印「两个判据实际一致」——一句该分支从没检查过的断言。结果是「真回归 + 一次
+#    SIGPIPE」以 PASS / rc=0 收场。⭐ 修法取**结构性**而非在每个分支各抄一份检查：
+#    「每分支各抄一份」正是让其中一份被漏掉的那种形状。
+if quota_menu_present "$_old_wording"; then _new_judge_ok=1; else _new_judge_ok=0; fi
 case "$(legacy_verdict usage_menu_present "$_old_wording")" in
-  yes)     if quota_menu_present "$_old_wording"; then
+  yes)     if (( _new_judge_ok )); then
              pass "新旧判据在旧文案上都命中（无回归）"
            else
              fail "旧文案上新旧判据不一致"
            fi ;;
   no)      fail "旧文案上新旧判据不一致" ;;
-  sigpipe) flake "旧文案：对照组这一次死于 SIGPIPE 而非给出判据，两个判据实际一致" ;;
+  sigpipe) if (( _new_judge_ok )); then
+             flake "旧文案：对照组这一次死于 SIGPIPE 而非给出判据；出厂判据已单独求值且命中"
+           else
+             # ⚠️ Deliberately its OWN wording, not the generic one used by yes)/no).
+             #    This text is reachable ONLY through "SIGPIPE ∧ shipped judge missed", so
+             #    the standing control for that cell (posctrl: flake-must-not-swallow-red)
+             #    can name it and cannot be satisfied by any other path. With the generic
+             #    string the control would also pass via yes), i.e. it would go red without
+             #    ever exercising the branch it exists to protect.
+             # ⚠️ 这里**特意**用与 yes)/no) 不同的措辞。这句话只有「SIGPIPE ∧ 出厂判据没命中」
+             #    这一条路走得到 ⇒ 那一格的常设控可以点名它，且无法被别的路径满足。
+             #    若沿用通用串，控经由 yes) 也会变红——它会在**从未走到**它要保护的那条分支时
+             #    就报成功。
+             fail "旧文案上新旧判据不一致：对照组这次死于 SIGPIPE，而出厂判据确实没命中 ⇒ 真回归，不是环境抖动"
+           fi ;;
 esac
-unset _old_wording
+unset _old_wording _new_judge_ok
 
 echo "── 选单入口：scrollback 里的死选单不得误判 ──"
 if quota_menu_present "$(read_fx menu-in-scrollback.txt)"; then

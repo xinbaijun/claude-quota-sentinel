@@ -230,6 +230,32 @@ ablate frozen-control-edited \
     "USAGE_MENU_FOOTER_REGEX='Enter to confirm.*Esc to cancel'" \
     "USAGE_MENU_FOOTER_REGEX='Enter to confirm.*Esc to CANCEL'"
 
+# m_flake_swallow — 同时制造「真回归」与「确定性 SIGPIPE」。
+# 这一格是 2026-09-02 的 review 抓出来的：实现方当时的六条控里有「真缺陷 ∧ 无 SIGPIPE」，
+# 也有「有 SIGPIPE ∧ 无真缺陷」，**唯独没有两者同时**——而 FLAKE 降级只可能在那一格吞红。
+# ⭐ 两条控各自都过，危险恰恰住在它们的合取里。
+m_flake_swallow() {
+  # ① 真回归（G-5 型：判据被重锚到别人的 UI 文案上）：把出厂判据的选项 1 正则改成只认另一段
+  #    文案 ⇒ 旧文案在出厂判据这边哑掉。这正是「选单入口：旧文案不得回归」存在的理由。
+  m_sed lib/config.sh \
+    'QUOTA_MENU_OPT1_REGEX="${QUOTA_MENU_OPT1_REGEX:-Stop and wait for limit to reset}"' \
+    'QUOTA_MENU_OPT1_REGEX="${QUOTA_MENU_OPT1_REGEX:-Upgrade your plan}"' || return 1
+  # ② 确定性 SIGPIPE，不打桩、不依赖机器负载：给夹具末尾补 4 MB 填充。冻结对照组是用
+  #    `echo "$t20"` 把内容管进 `grep -qE OPT1` 来匹配的，命中落在第 8 行、填充在其后 ⇒
+  #    grep 命中即退出时写入方还有 4 MB 没写完 ⇒ 必然 SIGPIPE，verdict 必为 sigpipe。
+  #    ⚠️ 夹具 .txt **不在** QS_LEGACY_SHA256 的覆盖面内（被校验的是 legacy-detectors.sh），
+  #    所以这一步既没碰对照组，也不会撞它的校验。
+  { head -c 4194304 /dev/zero | tr '\0' 'x'; printf '\n'; } >> "$C/test/fixtures/menu-old-wording.txt" || return 1
+}
+
+# ⚠️ 期望串**特意**用那条分支的专属文案，不用通用的「旧文案上新旧判据不一致」：
+#    通用串经由 yes) 分支也会出现 ⇒ 控会在**从未走到** sigpipe 分支的情况下就报成功，
+#    那是一条没有分辨力的控。专属串只有「SIGPIPE ∧ 出厂判据没命中」这一条路走得到。
+ablate flake-must-not-swallow-red \
+  "FLAKE 降级不得吞红：SIGPIPE ∧ 真回归 必须 FAIL 而非 FLAKE" --fast \
+  "对照组这次死于 SIGPIPE，而出厂判据确实没命中" \
+  m_flake_swallow
+
 # ══ 2–4. the three incident reproductions / 三次事故的复现 ═══════════════
 # 让旧判据也认得出新文案 ⇒「28 天哑掉」那条复现不出来，用例必须自己报「没复现原缺陷」
 ablate p1-menu-wording \
